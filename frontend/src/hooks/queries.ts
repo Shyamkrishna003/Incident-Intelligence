@@ -2,7 +2,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { useAuth } from "../auth/AuthContext";
 import { api } from "../lib/api";
-import type { ApiKeyScope, Severity } from "../lib/types";
+import type { ApiKeyScope, Severity, Verdict } from "../lib/types";
 
 /** Keys are namespaced by user id so one person never sees another's cached data. */
 function useUid(): string {
@@ -179,6 +179,29 @@ export function useRequestInvestigation(projectId: string, incidentId: string) {
     mutationFn: () => api.requestInvestigation(projectId, incidentId),
     onSettled: () =>
       queryClient.invalidateQueries({ queryKey: [uid, "investigations", projectId, incidentId] }),
+  });
+}
+
+export function useSubmitFeedback(projectId: string, investigationId: string) {
+  const uid = useUid();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { verdict: Verdict; actual_cause: string | null; notes: string | null }) =>
+      api.submitFeedback(projectId, investigationId, body),
+    onSuccess: () =>
+      Promise.all([
+        queryClient.invalidateQueries({ queryKey: [uid, "investigation", projectId] }),
+        queryClient.invalidateQueries({ queryKey: [uid, "learning", projectId] }),
+      ]),
+  });
+}
+
+export function useLearningRecords(projectId: string) {
+  const uid = useUid();
+  return useQuery({
+    queryKey: [uid, "learning", projectId],
+    queryFn: () => api.learningRecords(projectId),
+    staleTime: 0,
   });
 }
 

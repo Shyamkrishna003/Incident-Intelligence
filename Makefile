@@ -5,7 +5,7 @@
 COMPOSE := docker compose
 VENV_BIN := ../.venv/bin
 
-.PHONY: help env venv lock db infra emulator kafka-init web-install web web-check simulate eval up down logs migrate run consume detect work dlq bootstrap test test-unit lint fmt typecheck check
+.PHONY: help env venv lock db infra emulator kafka-init web-install web web-check simulate eval eval-investigation up down logs migrate run consume detect work dlq bootstrap test test-unit lint fmt typecheck check
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -68,6 +68,9 @@ work: venv ## Run the investigation worker on the host (needs GEMINI_API_KEY)
 
 eval: venv ## Score the detectors on labelled synthetic scenarios
 	cd backend && $(VENV_BIN)/ii eval detection
+
+eval-investigation: venv ## Score AI investigations on labelled cases (calls the real LLM)
+	cd backend && $(VENV_BIN)/ii eval investigation $(ARGS)
 
 dlq: venv ## Show dead-lettered messages (metadata only)
 	cd backend && $(VENV_BIN)/ii dlq inspect

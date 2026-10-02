@@ -753,3 +753,33 @@ Verified against the real Gemini API, once a key was available (the simulated pa
 - `gemini-3.8-flash` answered 503 "high demand" on all four tries, and the investigation failed with that message, as designed.
 - The first report's summary stated the cause as established. Prompt version 2 tells the model to write "the evidence suggests"; a second real run did.
 - This is one scenario, which the model could solve largely from the log text. It is not an evaluation.
+
+---
+
+## 22. Slice 8 (feedback, learning, evaluation): implementation record
+
+The *Learn* stage, and the means to measure the *Investigate* stage.
+
+- **`learning/service.py`:** feedback (one per person per investigation, revisable), the learning record it creates or updates, evaluation cases.
+- **`learning/evaluation.py`:** `EvalCase`, the rule-based `judge`, the runner, five built-in cases.
+- **`investigation/orchestrator.py`:** the model-facing steps were extracted into a database-free `ReportWriter`, so the evaluation runs exactly the steps an investigation runs.
+- **Migration `0008`:** `investigation_feedback`, `learning_records`, `evaluation_cases`.
+- **Web app:** feedback form under a report; Learning page.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| A learning record is created by feedback, not by incident resolution | A record without a human judgment has nothing to learn from. |
+| The record snapshots evidence, report, model and prompt version | It must stay usable after telemetry retention deletes the originals, and comparable across prompt versions. |
+| The judge is rule-based, not an LLM | Deterministic, free, and can't share the judged model's blind spots. The cost is bluntness; an LLM judge can be added as a separate, labelled signal. |
+| Verdict counts are shown as counts with a caveat, not as "RCA accuracy" | They cover only reports someone chose to review, so a percentage would look more meaningful than it is. |
+| "Could not run" is separate from "failed" | A quota error or outage is not a wrong answer. Found on the first real run. |
+| Evaluation is an explicit command, never part of `make check` | It calls the real model: slow, costs quota, and not deterministic. |
+| Saved cases need explicit rules from an admin | Free-text "actual cause" can't be judged automatically. |
+| Each built-in case is tested to be failable | A case no report can fail measures nothing. |
+
+Verified:
+- by tests: feedback rules and permissions, the learning record's contents, saving and loading a case, the judge, the runner with a scripted model
+- in a real browser against the emulator (with the Gemini stand-in): giving feedback, and the Learning page
+- against real Gemini (`gemini-3.5-flash`, prompt version 2): 3 passed, 0 failed, 2 could not run (429 quota exceeded). Two of the three passes needed one citation correction each. The prompt-injection case has not been run against a real model.

@@ -73,6 +73,9 @@ export function AppShell({
             <NavLink to={`${base}/anomalies`} className={navClass}>
               Anomalies
             </NavLink>
+            <NavLink to={`${base}/learning`} className={navClass}>
+              Learning
+            </NavLink>
             <NavLink to={`${base}/deployments`} className={navClass}>
               Deployments
             </NavLink>

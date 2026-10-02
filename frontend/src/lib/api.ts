@@ -8,8 +8,10 @@ import type {
   DeploymentList,
   IncidentDetail,
   IncidentList,
+  Feedback,
   Investigation,
   InvestigationDetail,
+  LearningOverview,
   LogList,
   Me,
   Metric,
@@ -18,6 +20,7 @@ import type {
   Project,
   Service,
   Severity,
+  Verdict,
 } from "./types";
 
 export interface ErrorDetail {
@@ -231,6 +234,19 @@ export const api = {
     request<InvestigationDetail>(
       `/v1/projects/${seg(projectId)}/investigations/${seg(investigationId)}`,
     ),
+
+  submitFeedback: (
+    projectId: string,
+    investigationId: string,
+    body: { verdict: Verdict; actual_cause: string | null; notes: string | null },
+  ) =>
+    request<Feedback>(
+      `/v1/projects/${seg(projectId)}/investigations/${seg(investigationId)}/feedback`,
+      { method: "PUT", body: JSON.stringify(body) },
+    ),
+
+  learningRecords: (projectId: string) =>
+    request<LearningOverview>(`/v1/projects/${seg(projectId)}/learning-records`),
 
   listApiKeys: (projectId: string) =>
     request<{ api_keys: ApiKey[] }>(`/v1/projects/${seg(projectId)}/api-keys`),

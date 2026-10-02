@@ -33,8 +33,11 @@ from incident_intel.db.session import create_engine, create_session_factory
 from incident_intel.detection.consumer import run_detection_consumer
 from incident_intel.detection.evaluation import candidates, evaluate, format_report
 from incident_intel.detection.service import DetectionSettings
-from incident_intel.investigation.llm import WorkerSettings
+from incident_intel.investigation.llm import WorkerSettings, build_provider
+from incident_intel.investigation.prompts import PROMPT_VERSION
 from incident_intel.investigation.worker import run_worker
+from incident_intel.learning.evaluation import builtin_cases, format_results, run_cases
+from incident_intel.learning.service import project_eval_cases
 from incident_intel.simulator.client import IngestClient, SimulatorError, build_http_client
 from incident_intel.simulator.runner import SimulationPlan, run_simulation
 from incident_intel.streaming.admin import ensure_topics, read_topic_from_start
@@ -102,7 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("work", help="Run the investigation worker until SIGTERM")
 
     evaluation = commands.add_parser("eval", help="Score detectors on labelled scenarios")
-    evaluation.add_argument("suite", choices=["detection"])
+    evaluation.add_argument("suite", choices=["detection", "investigation"])
+    evaluation.add_argument(
+        "--project",
+        metavar="ORG/PROJECT",
+        help="investigation suite: also run this project's saved cases",
+    )
+    evaluation.add_argument("--case", action="append", help="run only this case (repeatable)")
 
     dlq = commands.add_parser("dlq", help="Inspect dead-lettered messages")
     dlq_commands = dlq.add_subparsers(dest="dlq_command", required=True)
@@ -305,6 +314,33 @@ async def _simulate(args: argparse.Namespace) -> None:
     )
 
 
+async def _eval_investigation(args: argparse.Namespace) -> bool:
+    """Run evaluation cases against the configured model. Calls the real LLM."""
+    settings = WorkerSettings()
+    cases = builtin_cases()
+    if args.project:
+        org, _, project = args.project.partition("/")
+        engine = create_engine(settings)
+        try:
+            async with create_session_factory(engine)() as session:
+                cases += await project_eval_cases(
+                    session, organization_slug=org, project_slug=project
+                )
+        finally:
+            await engine.dispose()
+    if args.case:
+        cases = [case for case in cases if case.name in set(args.case)]
+    if not cases:
+        raise AppError("No evaluation cases match.")
+    provider = build_provider(settings)
+    try:
+        results = await run_cases(provider, cases)
+    finally:
+        await provider.close()
+    print(format_results(results, model=provider.model, prompt_version=PROMPT_VERSION))
+    return all(result.passed for result in results)
+
+
 async def _work() -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -329,6 +365,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             asyncio.run(_consume(settings, args.consumer))
         elif args.command == "work":
             asyncio.run(_work())
+        elif args.command == "eval" and args.suite == "investigation":
+            return 0 if asyncio.run(_eval_investigation(args)) else 1
         elif args.command == "eval":
             _eval_detection(settings)
         elif args.command == "dlq":

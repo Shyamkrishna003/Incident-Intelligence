@@ -54,6 +54,7 @@ const detail: InvestigationDetail = {
   steps: [],
   input_tokens: 1200,
   output_tokens: 300,
+  feedback: [],
 };
 
 const panel = (canInvestigate = true) => (

@@ -1,5 +1,6 @@
 import { useState } from "react";
 
+import { FeedbackSection } from "./FeedbackSection";
 import { useLatestInvestigation, useRequestInvestigation } from "../hooks/queries";
 import { describeError } from "../lib/api";
 import { formatDateTime } from "../lib/format";
@@ -68,7 +69,7 @@ export function InvestigationPanel({
         </>
       ) : active ? (
         <div role="status" className="mt-2">
-          <LoadingState label="Investigating: collecting the evidence and asking the model. This usually takes under a minute." />
+          <LoadingState label="Investigating: collecting the evidence and asking the model. This usually takes a minute or two." />
         </div>
       ) : latest.status === "failed" ? (
         <div className="mt-3">
@@ -93,6 +94,11 @@ export function InvestigationPanel({
       ) : (
         <>
           <ReportView investigation={detail.data} />
+          <FeedbackSection
+            projectId={projectId}
+            investigation={detail.data}
+            canGiveFeedback={canInvestigate}
+          />
           <div className="mt-4">{button("Investigate again")}</div>
         </>
       )}

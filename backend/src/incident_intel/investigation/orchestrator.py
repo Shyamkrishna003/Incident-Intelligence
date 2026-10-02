@@ -72,57 +72,16 @@ def _parse[ModelT: BaseModel](model: type[ModelT], text: str) -> ModelT:
         return model.model_validate_json(stripped.strip())
 
 
-class _Run:
-    def __init__(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        provider: LLMProvider,
-        investigation: Investigation,
-        *,
-        max_llm_attempts: int,
-        sleep: Sleep,
-    ) -> None:
-        self._session_factory = session_factory
+class ReportWriter:
+    """The model-facing part of an investigation: draft a report from evidence, and review
+    its hypotheses. Needs no database, so the evaluation suite uses it directly."""
+
+    def __init__(self, provider: LLMProvider, *, max_llm_attempts: int, sleep: Sleep) -> None:
         self._provider = provider
-        self._id = investigation.id
-        self._project_id = investigation.project_id
-        self._attempt = investigation.attempts
-        self._scope = TenantScope(investigation.organization_id, investigation.project_id)
-        self._incident_id = investigation.incident_id
         self._max_llm_attempts = max_llm_attempts
         self._sleep = sleep
-        self._seq = 0
         self.input_tokens = 0
         self.output_tokens = 0
-
-    async def step[T](self, kind: str, action: Callable[[dict[str, Any]], Awaitable[T]]) -> T:
-        """Run one step and record it, whether it succeeds or fails."""
-        self._seq += 1
-        started_at, clock = datetime.now(UTC), time.perf_counter()
-        summary: dict[str, Any] = {}
-        status, error = "ok", None
-        try:
-            return await action(summary)
-        except Exception as exc:
-            status, error = "failed", str(exc)[:500]
-            raise
-        finally:
-            async with self._session_factory() as session:
-                session.add(
-                    InvestigationStep(
-                        investigation_id=self._id,
-                        project_id=self._project_id,
-                        attempt=self._attempt,
-                        seq=self._seq,
-                        kind=kind,
-                        status=status,
-                        started_at=started_at,
-                        duration_ms=round((time.perf_counter() - clock) * 1000),
-                        summary=summary,
-                        error=error,
-                    )
-                )
-                await session.commit()
 
     async def call_model(self, summary: dict[str, Any], *, system: str, user: str) -> LLMResponse:
         """Call the model, waiting and retrying while the provider is rate limited or
@@ -144,39 +103,6 @@ class _Run:
             self.output_tokens += response.output_tokens or 0
             return response
         raise InvestigationFailed("The model could not be reached.")  # pragma: no cover
-
-    async def collect(self, summary: dict[str, Any]) -> list[EvidenceItem]:
-        async with self._session_factory() as session:
-            try:
-                detail, items = await collect_evidence(session, self._scope, self._incident_id)
-            except NotFoundError as exc:
-                raise InvestigationFailed("The incident no longer exists.") from exc
-            if not detail.anomalies:
-                raise InvestigationFailed("This incident has no anomalies to investigate.")
-            # A retried run replaces the evidence of the earlier attempt.
-            await session.execute(
-                delete(InvestigationEvidence).where(
-                    InvestigationEvidence.investigation_id == self._id
-                )
-            )
-            session.add_all(
-                InvestigationEvidence(
-                    investigation_id=self._id,
-                    ref=item.ref,
-                    project_id=self._project_id,
-                    position=position,
-                    kind=item.kind,
-                    title=item.title,
-                    data=item.data,
-                )
-                for position, item in enumerate(items)
-            )
-            await session.commit()
-        summary["evidence_items"] = len(items)
-        summary["by_kind"] = {
-            kind: sum(item.kind == kind for item in items) for kind in {i.kind for i in items}
-        }
-        return items
 
     async def analyze(self, summary: dict[str, Any], evidence: list[dict[str, Any]]) -> RawReport:
         response = await self.call_model(
@@ -223,6 +149,106 @@ class _Run:
             return None
         summary["verdicts"] = [review.verdict for review in verification.reviews]
         return verification
+
+
+async def write_checked_report(
+    writer: ReportWriter, evidence: list[dict[str, Any]]
+) -> tuple[Report, list[str]]:
+    """Analyze, check citations, verify. The same sequence an investigation runs, without
+    the database or step records. Raises InvestigationFailed."""
+    valid_refs = {str(item["ref"]) for item in evidence}
+    raw = await writer.analyze({}, evidence)
+    report, notes = validate_report(raw, valid_refs)
+    try:
+        verification = await writer.verify({}, evidence, report)
+    except InvestigationFailed as exc:
+        return order_hypotheses(report), [*notes, f"The verification step could not run ({exc})."]
+    if verification is None:
+        return order_hypotheses(report), notes
+    verified, changes = apply_verification(report, verification, valid_refs)
+    return verified, [*notes, *changes]
+
+
+class _Run(ReportWriter):
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        provider: LLMProvider,
+        investigation: Investigation,
+        *,
+        max_llm_attempts: int,
+        sleep: Sleep,
+    ) -> None:
+        super().__init__(provider, max_llm_attempts=max_llm_attempts, sleep=sleep)
+        self._session_factory = session_factory
+        self._id = investigation.id
+        self._project_id = investigation.project_id
+        self._attempt = investigation.attempts
+        self._scope = TenantScope(investigation.organization_id, investigation.project_id)
+        self._incident_id = investigation.incident_id
+        self._seq = 0
+
+    async def step[T](self, kind: str, action: Callable[[dict[str, Any]], Awaitable[T]]) -> T:
+        """Run one step and record it, whether it succeeds or fails."""
+        self._seq += 1
+        started_at, clock = datetime.now(UTC), time.perf_counter()
+        summary: dict[str, Any] = {}
+        status, error = "ok", None
+        try:
+            return await action(summary)
+        except Exception as exc:
+            status, error = "failed", str(exc)[:500]
+            raise
+        finally:
+            async with self._session_factory() as session:
+                session.add(
+                    InvestigationStep(
+                        investigation_id=self._id,
+                        project_id=self._project_id,
+                        attempt=self._attempt,
+                        seq=self._seq,
+                        kind=kind,
+                        status=status,
+                        started_at=started_at,
+                        duration_ms=round((time.perf_counter() - clock) * 1000),
+                        summary=summary,
+                        error=error,
+                    )
+                )
+                await session.commit()
+
+    async def collect(self, summary: dict[str, Any]) -> list[EvidenceItem]:
+        async with self._session_factory() as session:
+            try:
+                detail, items = await collect_evidence(session, self._scope, self._incident_id)
+            except NotFoundError as exc:
+                raise InvestigationFailed("The incident no longer exists.") from exc
+            if not detail.anomalies:
+                raise InvestigationFailed("This incident has no anomalies to investigate.")
+            # A retried run replaces the evidence of the earlier attempt.
+            await session.execute(
+                delete(InvestigationEvidence).where(
+                    InvestigationEvidence.investigation_id == self._id
+                )
+            )
+            session.add_all(
+                InvestigationEvidence(
+                    investigation_id=self._id,
+                    ref=item.ref,
+                    project_id=self._project_id,
+                    position=position,
+                    kind=item.kind,
+                    title=item.title,
+                    data=item.data,
+                )
+                for position, item in enumerate(items)
+            )
+            await session.commit()
+        summary["evidence_items"] = len(items)
+        summary["by_kind"] = {
+            kind: sum(item.kind == kind for item in items) for kind in {i.kind for i in items}
+        }
+        return items
 
 
 async def _pipeline(run: _Run, notes: list[str]) -> Report:

@@ -236,6 +236,34 @@ export interface EvidenceItem {
   data: Record<string, unknown>;
 }
 
+export type Verdict = "correct" | "partially_correct" | "incorrect";
+
+export interface Feedback {
+  verdict: Verdict;
+  actual_cause: string | null;
+  notes: string | null;
+  author: string;
+  updated_at: string;
+  mine: boolean;
+}
+
+export interface LearningRecord {
+  id: string;
+  incident_id: string;
+  incident_title: string | null;
+  investigation_id: string;
+  verdict: Verdict;
+  confirmed_cause: string | null;
+  model: string | null;
+  prompt_version: string | null;
+  updated_at: string;
+}
+
+export interface LearningOverview {
+  counts: Record<Verdict, number>;
+  records: LearningRecord[];
+}
+
 export interface InvestigationDetail extends Investigation {
   report: InvestigationReport | null;
   validation_notes: string[];
@@ -243,6 +271,7 @@ export interface InvestigationDetail extends Investigation {
   steps: { kind: string; status: string; duration_ms: number; error: string | null }[];
   input_tokens: number;
   output_tokens: number;
+  feedback: Feedback[];
 }
 
 export type ApiKeyScope = "ingest:write" | "telemetry:read";

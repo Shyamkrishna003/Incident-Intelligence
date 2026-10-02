@@ -24,6 +24,7 @@ from incident_intel.incidents.router import project_router as incidents_project_
 from incident_intel.incidents.router import router as incidents_router
 from incident_intel.ingestion.router import router as ingestion_router
 from incident_intel.investigation.router import router as investigation_router
+from incident_intel.learning.router import router as learning_router
 from incident_intel.streaming.producer import KafkaPublisher, MessagePublisher
 from incident_intel.streaming.topics import DEPLOYMENTS, LOGS, METRICS, topic_name
 from incident_intel.telemetry.event_router import project_router as event_project_router
@@ -99,4 +100,5 @@ def create_app(
     app.include_router(incidents_router)
     app.include_router(incidents_project_router)
     app.include_router(investigation_router)
+    app.include_router(learning_router)
     return app

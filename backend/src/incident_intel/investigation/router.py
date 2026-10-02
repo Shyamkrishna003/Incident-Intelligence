@@ -19,6 +19,8 @@ from incident_intel.investigation.service import (
     list_investigations,
     request_investigation,
 )
+from incident_intel.learning.router import FeedbackOut, feedback_out
+from incident_intel.learning.service import list_feedback
 from incident_intel.tenancy.access import ProjectAccess
 from incident_intel.tenancy.roles import Role
 
@@ -71,6 +73,8 @@ class InvestigationDetailOut(InvestigationOut):
     steps: list[StepOut]
     input_tokens: int
     output_tokens: int
+    # What people said about this report.
+    feedback: list[FeedbackOut]
 
 
 class InvestigationListResponse(BaseModel):
@@ -127,6 +131,7 @@ async def get_investigation_route(
     investigation_id: uuid.UUID, access: ViewerAccess, session: Session
 ) -> InvestigationDetailOut:
     detail = await get_investigation(session, access.scope, investigation_id)
+    feedback = await list_feedback(session, access.scope, investigation_id)
     investigation = detail.investigation
     return InvestigationDetailOut(
         **_out(investigation).model_dump(),
@@ -150,4 +155,5 @@ async def get_investigation_route(
         ],
         input_tokens=investigation.input_tokens,
         output_tokens=investigation.output_tokens,
+        feedback=[feedback_out(view, access.user.id) for view in feedback],
     )

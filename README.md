@@ -10,7 +10,7 @@ AI-assisted incident detection, investigation, root-cause analysis, and reliabil
 
 ## Status
 
-Implemented through **slice 7: *Observe*, *Detect*, *Correlate* and *Investigate* (AI-assisted, evidence-cited analysis), with sign-in for people, a web app, and a scenario simulator**:
+Implemented through **slice 8: *Observe*, *Detect*, *Correlate*, *Investigate* and *Learn* (feedback, learning records, evaluation), with sign-in for people, a web app, and a scenario simulator**:
 
 - **Foundation (slice 1):**
   - FastAPI backend with typed configuration, structured JSON logs (with secret redaction), and request IDs.
@@ -64,7 +64,13 @@ Implemented through **slice 7: *Observe*, *Detect*, *Correlate* and *Investigate
   - A second model call tries to disprove each hypothesis.
   - The run, its steps and the exact evidence shown to the model are stored.
 
-Next come human feedback, learning records and evaluation of the investigations. See the architecture doc, §11.
+- **Feedback and learning (slice 8):**
+  - People mark an investigation's report correct, partially correct or incorrect, and can state the actual cause.
+  - Each reviewed investigation becomes a self-contained learning record: evidence, report, model and prompt version, and the feedback.
+  - `ii eval investigation` runs labelled cases through the real model and judges the reports with fixed rules.
+  - An admin can save a reviewed investigation as a new evaluation case.
+
+Next comes hardening: retention, row-level security, monitoring, CI and deployment. See the architecture doc, §11.
 
 ## How ingestion works
 
@@ -245,6 +251,40 @@ An investigation starts only when a member clicks **Investigate with AI** on an 
 
 **Data leaves your infrastructure.** The evidence for an incident is sent to Google's Gemini API. Check the data-use terms of your Gemini plan before using this with real telemetry.
 
+## Feedback, learning records and evaluation
+
+**Feedback.** Under each report the app asks "Was this analysis right?": correct, partially correct or incorrect, with an optional actual cause and notes. Each person has one answer per investigation and can revise it. Giving feedback needs the member role.
+
+**Learning records.** The first feedback on an investigation creates a learning record, and later feedback updates it. A record holds the incident summary, every evidence item as the model saw it, the checked report, the model and prompt version, and all feedback. It is self-contained, so it stays meaningful after telemetry is deleted. The **Learning** page lists them with a count per verdict.
+
+- The counts cover only investigations someone chose to review. They are not a measured accuracy rate.
+- Nothing here retrains a model. The records are the material for measuring changes.
+
+**Evaluation.** `make eval-investigation` (or `ii eval investigation`) runs each case's evidence through the same analyze, check and verify steps as a real investigation, using the configured model, and judges the result:
+
+| Rule | Meaning |
+|---|---|
+| `expect_supported` | Whether the report should (or must not) contain a hypothesis assessed "supported" |
+| `must_mention` | The leading hypothesis must mention at least one of these words |
+| `must_not_mention` | No supported or weakly supported hypothesis may name any of these |
+
+The five built-in cases are synthetic and hand-written:
+
+| Case | What it checks |
+|---|---|
+| `bad_deployment` | Blames the deployment of the affected service, not an unrelated one |
+| `dependency_failure_no_deployment` | Finds a database disk problem, and doesn't invent a deployment |
+| `insufficient_evidence` | Calls nothing "supported" when there's nothing to base it on |
+| `unrelated_deployment_only` | Doesn't blame a deployment of an unaffected service |
+| `instructions_inside_logs` | Follows the evidence, not a log line that gives it instructions |
+
+- Results are reported as passed, failed, or **could not run** (the provider failed or the quota ran out). A case that could not run says nothing about the model.
+- The judge is keyword-based, so it is deterministic but blunt. It checks whether a report points the right way, not whether its reasoning is sound.
+- This command calls the real model, so it costs quota. It is never run by `make check`.
+- `--case NAME` runs one case. `--project ORG/PROJECT` adds that project's saved cases.
+
+**Saving a case.** `POST /v1/projects/{project_id}/investigations/{investigation_id}/evaluation-case` (admin) stores a finished investigation's evidence with the rules a good report must satisfy.
+
 ## Scenario simulator
 
 `ii simulate` produces a synthetic incident modelled on the PRD's example and sends it through the real ingestion API, so detection and investigation can be built and evaluated without production data.
@@ -365,6 +405,8 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | Setup | Shown until the user can reach a project. Asks for email verification first, then creates an organization and its first project. If setup was interrupted after the organization was created, it asks only for the project. |
 | Incidents | The landing page. Incidents in the last 7 days, ongoing first, with severity, affected services, duration and anomaly count. |
 | Incident (AI investigation) | Start an investigation, watch its progress, and read the report. Citations open the evidence they point to. Failures show the reason and a retry button. |
+| Incident (feedback) | Under a report: "Was this analysis right?", with the actual cause. Shows other people's answers. |
+| Learning | Reviewed investigations with a count per verdict, each linking to its incident. |
 | Incident | **What was observed** (each anomaly with its evidence and a link to its chart), **What changed** (candidate deployments, labelled as candidates), **Not yet known** (the cause), and the **Timeline** with the reason for each grouping decision. |
 | Services | The services that have sent telemetry to the selected project. Refreshes when opened and every 30 seconds. |
 | Service | Pick a metric and a time range (15 minutes to 24 hours). One line per series (attribute set), a legend, a hover readout of every series, and the same values as a table. Deployments of the service are marked on the chart, and periods with a detected anomaly are shaded. Below it, the service's logs for the same time range, filterable by severity and text. Refreshes every 30 seconds. |
@@ -410,6 +452,10 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | POST | `/v1/projects/{project_id}/incidents/{incident_id}/investigations` | member, admin or owner | Queue an AI investigation. Returns **202**; **409** if one is already in progress; **429** over the hourly cap. |
 | GET | `/v1/projects/{project_id}/incidents/{incident_id}/investigations` | any member | The incident's investigations, newest first |
 | GET | `/v1/projects/{project_id}/investigations/{investigation_id}` | any member | One investigation: the checked report, what the checks changed, the evidence snapshots and the recorded steps |
+| PUT | `/v1/projects/{project_id}/investigations/{investigation_id}/feedback` | member, admin or owner | Give or revise feedback on a finished report: `verdict`, optional `actual_cause` and `notes` |
+| GET | `/v1/projects/{project_id}/learning-records` | any member | Verdict counts and the reviewed investigations, newest first |
+| POST | `/v1/projects/{project_id}/investigations/{investigation_id}/evaluation-case` | admin or owner | Save the investigation's evidence as an evaluation case with rules |
+| GET | `/v1/projects/{project_id}/evaluation-cases` | admin or owner | The project's saved evaluation cases |
 | GET | `/v1/projects/{project_id}/dependencies` | any member | Declared service dependencies |
 | PUT | `/v1/projects/{project_id}/dependencies` | admin or owner | Replace the declared dependencies |
 | GET | `/v1/services/{service}/metrics` | API key with `telemetry:read` | The metrics a service has reported, with the number of series each has. Also at `/v1/projects/{project_id}/services/{service}/metrics` for signed-in users. |
@@ -450,6 +496,7 @@ ii kafka init                      # create missing topics (existing ones are le
 ii consume storage                 # run the storage consumer until SIGTERM/SIGINT
 ii consume detection               # run the detection consumer
 ii work                            # run the investigation worker (holds the LLM API key)
+ii eval investigation [--case NAME] [--project ORG/PROJECT]   # score AI reports; calls the real model
 ii eval detection                  # score the detectors on labelled synthetic scenarios
 ii dlq inspect [--kind metrics|logs|deployments] [--limit 20] [--show-values]   # bodies hidden by default
 ii simulate [--live] [--no-incident] [--backfill-minutes 60] [--incident-after-minutes 45] [--seed 1]
@@ -509,6 +556,7 @@ backend/
     streaming/   Kafka: topics, async publisher, consumer loop with dead-lettering, admin
     ingestion/   ingestion API: schemas, normalization, publishing
     telemetry/   message contracts, models, idempotent storage consumer, read APIs
+    learning/    feedback, learning records, evaluation cases and the rule-based judge
     investigation/  evidence collection, LLM provider (Gemini), prompts, report checks, orchestrator, worker
     incidents/   grouping rules, incident lifecycle and timeline, service dependencies, incidents API
     detection/   detectors, anomaly engine, detection consumer, evaluation suite, anomalies API
@@ -562,7 +610,11 @@ See [.env.example](.env.example).
 - **No user-configured thresholds or alert rules yet,** and no notifications. Anomalies are visible in the app and the API only.
 - **Real Gemini runs are slow and sometimes unavailable.** Two real investigations of the simulated incident with `gemini-3.5-flash` took about 105 and 130 seconds. `gemini-3.8-flash` answered "high demand" (503) four times in a row, which fails the investigation with that message.
 - **The real model was run on one scenario only,** the simulated payment incident.
-- **Report quality is not evaluated yet.** The checks guarantee that citations are real, not that the reasoning is right. An evaluation suite for investigations is the next slice.
+- **The real-model evaluation is incomplete.** With `gemini-3.5-flash` and prompt version 2, three built-in cases passed (`bad_deployment`, `dependency_failure_no_deployment`, `insufficient_evidence`). The other two, including the prompt-injection case, could not run because the Gemini quota was exhausted.
+- **The evaluation judge is keyword-based** and the built-in cases are synthetic. Passing them is weak evidence of quality.
+- **Evaluation results aren't stored.** The command prints them; there's no history or trend yet.
+- **Saving an evaluation case is API-only,** with no screen in the web app.
+- **A learning record's verdict follows the most recent feedback** when several people disagree. All answers are kept in the record.
 - **Only Gemini is supported.** A local Ollama provider is planned.
 - **Evidence is a fixed set.** The model can't ask for more (for example a different time window), and no metric time series beyond each anomaly's summary is included.
 - **Investigations are manual.** None starts automatically when an incident opens.

@@ -12,6 +12,7 @@ import { AnomaliesPage } from "./pages/AnomaliesPage";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
 import { DeploymentsPage } from "./pages/DeploymentsPage";
 import { IncidentPage } from "./pages/IncidentPage";
+import { LearningPage } from "./pages/LearningPage";
 import { IncidentsPage } from "./pages/IncidentsPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
 import { ServicesPage } from "./pages/ServicesPage";
@@ -135,6 +136,7 @@ function ProjectRoutes({ me, account }: { me: Me; account: Account }) {
           }
         />
         <Route path="anomalies" element={<AnomaliesPage current={current} />} />
+        <Route path="learning" element={<LearningPage current={current} />} />
         <Route path="deployments" element={<DeploymentsPage current={current} />} />
         <Route path="api-keys" element={<ApiKeysPage current={current} />} />
         <Route path="*" element={<Navigate to="incidents" replace />} />
