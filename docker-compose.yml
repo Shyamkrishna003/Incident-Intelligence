@@ -103,6 +103,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-600}
       RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+      # Sign-in for human users. Empty project id: user endpoints answer 503.
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_AUTH_EMULATOR_HOST: ${FIREBASE_AUTH_EMULATOR_HOST:-}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -130,6 +133,20 @@ services:
         condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
+
+  # Optional: local stand-in for Firebase Authentication (`make emulator`). Started only
+  # with the "emulator" profile, so `make up` does not need this large image.
+  firebase-emulator:
+    build: ./infra/firebase-emulator
+    profiles: ["emulator"]
+    ports:
+      - "127.0.0.1:9099:9099"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9099/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
 
 volumes:
   pgdata:

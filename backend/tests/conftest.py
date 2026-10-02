@@ -38,7 +38,13 @@ from incident_intel.main import create_app
 from incident_intel.tenancy.api_keys import DEFAULT_SCOPES, ApiKeyScope
 from incident_intel.tenancy.models import ApiKey, Organization, Project
 from incident_intel.tenancy.service import create_organization, create_project, issue_api_key
-from tests.support import TEST_PEPPER, FakeCache, FakePublisher, make_settings
+from tests.support import (
+    TEST_PEPPER,
+    FakeCache,
+    FakePublisher,
+    FakeTokenVerifier,
+    make_settings,
+)
 
 
 class _TestEnvironment(BaseSettings):
@@ -47,6 +53,7 @@ class _TestEnvironment(BaseSettings):
     test_database_url: SecretStr | None = None
     test_kafka_bootstrap_servers: str | None = None
     test_redis_url: SecretStr | None = None
+    test_firebase_auth_emulator_host: str | None = None
 
 
 @pytest.fixture(scope="session")
@@ -120,10 +127,21 @@ def cache() -> FakeCache:
 
 
 @pytest.fixture
+def token_verifier() -> FakeTokenVerifier:
+    return FakeTokenVerifier()
+
+
+@pytest.fixture
 async def app(
-    settings: Settings, db_session: AsyncSession, publisher: FakePublisher, cache: FakeCache
+    settings: Settings,
+    db_session: AsyncSession,
+    publisher: FakePublisher,
+    cache: FakeCache,
+    token_verifier: FakeTokenVerifier,
 ) -> AsyncIterator[FastAPI]:
-    application = create_app(settings, publisher=publisher, cache=cache.services())
+    application = create_app(
+        settings, publisher=publisher, cache=cache.services(), token_verifier=token_verifier
+    )
 
     async def _test_session() -> AsyncIterator[AsyncSession]:
         yield db_session
@@ -183,3 +201,29 @@ class TenantFactory:
 @pytest.fixture
 def make_tenant(db_session: AsyncSession) -> TenantFactory:
     return TenantFactory(db_session)
+
+
+@dataclass(frozen=True)
+class SignedInUser:
+    """A person holding a valid sign-in token (no database row until their first request)."""
+
+    uid: str
+    token: str
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.token}"}
+
+
+class UserFactory:
+    def __init__(self, verifier: FakeTokenVerifier) -> None:
+        self._verifier = verifier
+
+    def __call__(self, *, email_verified: bool = True, uid: str | None = None) -> SignedInUser:
+        token = self._verifier.issue(uid=uid, email_verified=email_verified)
+        return SignedInUser(uid=self._verifier.identities[token].uid, token=token)
+
+
+@pytest.fixture
+def make_user(token_verifier: FakeTokenVerifier) -> UserFactory:
+    return UserFactory(token_verifier)

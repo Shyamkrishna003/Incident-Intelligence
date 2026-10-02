@@ -10,7 +10,7 @@ AI-assisted incident detection, investigation, root-cause analysis, and reliabil
 
 ## Status
 
-Implemented through **slice 2b: metric ingestion via Kafka, protected by Redis** (the *Observe* stage):
+Implemented through **slice 3a: metric ingestion (the *Observe* stage) plus sign-in for people**:
 
 - **Foundation (slice 1):**
   - FastAPI backend with typed configuration, structured JSON logs (with secret redaction), and request IDs.
@@ -28,7 +28,12 @@ Implemented through **slice 2b: metric ingestion via Kafka, protected by Redis**
   - Verified API keys are cached briefly, so most requests skip the database lookup.
   - Redis is only a cache and limiter. If it's down, the API keeps working.
 
-Next come sign-in (Firebase), the frontend, detection and AI investigation. See the architecture doc, §11.
+- **Users and roles (slice 3a):**
+  - People sign in with Firebase Authentication (email/password, Google or GitHub) and call the API with their ID token.
+  - Firebase only proves identity. Organization membership and roles live in PostgreSQL and are checked on every request.
+  - Signed-in users can create an organization and projects, manage API keys, and read their projects' services and metrics.
+
+Next come the web frontend (slice 3b), detection and AI investigation. See the architecture doc, §11.
 
 ## How ingestion works
 
@@ -73,6 +78,38 @@ service ──POST /v1/ingest/metrics──► API ── validate, stamp tenant
   - A single broker in KRaft mode (no ZooKeeper), with the JVM heap capped at 512 MB.
   - It runs PLAINTEXT, without authentication, and is published on localhost only. TLS, SASL and ACLs come with deployment hardening.
 - **Operating cost:** one more service to run and monitor. Consumer lag is the key health metric (Prometheus arrives in the hardening slice).
+
+## Two kinds of caller
+
+| | Programs (services sending telemetry) | People (using the console) |
+|---|---|---|
+| Credential | Project API key: `Authorization: Bearer ii_...` | Firebase ID token: `Authorization: Bearer <token>` |
+| Scope | Exactly one project, fixed by the key | Every organization the user is a member of |
+| Permissions | Key scopes: `ingest:write`, `telemetry:read` | Role in the organization (below) |
+| Endpoints | `/v1/project`, `/v1/ingest/...`, `/v1/services/...` | `/v1/me`, `/v1/organizations/...`, `/v1/projects/...` |
+
+The two are not interchangeable: an API key is rejected on user endpoints, and an ID token on key endpoints.
+
+### Roles
+
+| Role | Can do |
+|---|---|
+| `viewer` | Read projects, services and metrics |
+| `member` | Same as viewer for now; will act on incidents in a later slice |
+| `admin` | Also create projects, and create, list and revoke API keys |
+| `owner` | Everything. The user who created the organization. |
+
+- A user gets **404** for an organization or project they aren't a member of, the same as for one that doesn't exist. **403** means they are a member but their role is too low.
+- Role changes take effect on the next request, with no need to sign in again.
+- Creating an organization needs a verified email address. A user can own at most 10 organizations (`MAX_OWNED_ORGANIZATIONS_PER_USER`).
+
+### Sign-in at a glance
+
+- **Responsibility:** Firebase Authentication proves who a person is. This API verifies the ID token's signature, issuer, audience and expiry with the official SDK.
+- **What the backend needs:** only `FIREBASE_PROJECT_ID`, a public identifier. No service-account key is used; verification relies on Google's public signing keys, which the SDK fetches and caches.
+- **If `FIREBASE_PROJECT_ID` is unset:** user endpoints answer 503. API-key endpoints are unaffected.
+- **If Google's keys can't be fetched:** user endpoints answer 503 until they can.
+- **Local emulator (optional):** `make emulator` starts the Firebase Auth emulator on `localhost:9099`. Set `FIREBASE_AUTH_EMULATOR_HOST=localhost:9099` and `FIREBASE_PROJECT_ID=demo-incident-intel` to use it. The emulator issues unsigned tokens and doesn't check expiry, so the API refuses to start with it when `ENVIRONMENT=production`.
 
 ### Redis at a glance
 
@@ -129,6 +166,14 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | GET | `/v1/project` | API key | The organization, project, and key the credential belongs to |
 | POST | `/v1/ingest/metrics` | API key with `ingest:write` | Accepts 1–1000 points (body ≤ 1 MiB). Requires an `Idempotency-Key` header. Returns **202** with `batch_id`, or **409** if the key was already used with different data. |
 | GET | `/v1/services` | API key with `telemetry:read` | Services that have sent telemetry to this project |
+| GET | `/v1/me` | signed-in user | The user, their organizations and roles, and each organization's projects. Creates the user record on first call. |
+| POST | `/v1/organizations` | signed-in user, verified email | Create an organization. The caller becomes its owner. |
+| POST | `/v1/organizations/{organization_id}/projects` | admin or owner | Create a project |
+| GET | `/v1/projects/{project_id}/api-keys` | admin or owner | List the project's API keys (never the key or its hash) |
+| POST | `/v1/projects/{project_id}/api-keys` | admin or owner | Create an API key. The full key is in this response only. |
+| DELETE | `/v1/projects/{project_id}/api-keys/{prefix}` | admin or owner | Revoke a key of this project. Takes effect immediately. |
+| GET | `/v1/projects/{project_id}/services` | any member | Services in the project |
+| GET | `/v1/projects/{project_id}/services/{service}/metrics/{metric}` | any member | Metric points, same parameters as the API-key endpoint |
 | GET | `/v1/services/{service}/metrics/{metric}` | API key with `telemetry:read` | Points in `[start, end)` (default: the last hour; at most 24 h), grouped by attribute set. `limit` defaults to 1000 and can be at most 10 000; `truncated` is true if more points exist. |
 
 ### Ingestion rules
@@ -147,7 +192,7 @@ Errors share one envelope: `{"error": {"code", "message", "request_id", "details
 - Authentication failures always return the same generic 401. The specific reason is logged server-side only.
 - A missing scope returns 403.
 - A dependency outage returns 503 with `Retry-After`.
-- Exceeding the per-key rate limit returns 429 with `Retry-After`. The limit applies to every authenticated endpoint.
+- Exceeding the rate limit returns 429 with `Retry-After`. The limit applies to every authenticated endpoint, per API key or per user.
 - Validation errors never echo submitted values.
 
 ## Admin CLI
@@ -175,7 +220,7 @@ ii dlq inspect [--limit 20] [--show-values]   # dead-lettered messages; bodies h
 | `make check` | lint + type check + all tests |
 | `make lint` / `make fmt` | ruff check / ruff format |
 | `make typecheck` | mypy `--strict` |
-| `make test` | pytest: unit, integration (PostgreSQL), Redis, and end-to-end (Kafka). Needs `make infra`. |
+| `make test` | pytest: unit, integration (PostgreSQL), Redis, and end-to-end (Kafka). Needs `make infra`. Emulator tests also need `make emulator`. |
 | `make test-unit` | tests that need no PostgreSQL, Kafka or Redis |
 | `make logs` / `make dlq` | follow API and consumer logs / inspect the dead-letter topic |
 | `make lock` | re-pin dependencies after editing `backend/pyproject.toml` |
@@ -187,6 +232,9 @@ ii dlq inspect [--limit 20] [--show-values]   # dead-lettered messages; bodies h
   - One test checks that the models and migrations define exactly the same schema.
 - **End-to-end Kafka tests** (marker `kafka`) run when `TEST_KAFKA_BOOTSTRAP_SERVERS` is set. Otherwise they're reported as skipped.
   - Each test creates its own uniquely named topics and deletes them afterwards.
+- **Sign-in** is tested with an in-memory token verifier. The real Firebase verifier is tested offline (malformed, wrong project, unsigned tokens).
+  - **Emulator tests** (marker `firebase`) run when `TEST_FIREBASE_AUTH_EMULATOR_HOST` is set and `make emulator` is running. Otherwise they're reported as skipped.
+- **Roles and isolation:** every role is checked against every user endpoint, and a user from another organization gets 404 everywhere.
 - **Redis tests** (marker `redis`) run when `TEST_REDIS_URL` is set. Otherwise they're reported as skipped.
   - Every other test uses an in-memory stand-in. A contract suite runs the same checks against both the stand-in and real Redis, so the two can't drift apart.
   - Each test uses a random key prefix and deletes only its own keys.
@@ -199,7 +247,8 @@ backend/
   src/incident_intel/
     core/        config, logging + redaction, errors, middleware (request context, body limit)
     db/          engine/session lifecycle, base model, migration helpers
-    tenancy/     organizations, projects, API keys, tenant context
+    auth/        verifying Firebase ID tokens
+    tenancy/     organizations, projects, API keys, users, memberships, roles, access checks
     audit/       audit log
     api/         health probes, auth + scope dependencies
     cache/       Redis: gateway with circuit breaker, rate limiter, idempotency claims, API-key cache
@@ -208,9 +257,10 @@ backend/
     telemetry/   message contract, models, idempotent storage consumer, read API
     migrations/  Alembic environment and revisions (shipped inside the package)
     cli.py       `ii` admin CLI
-  tests/{unit,integration,cache,kafka}/
+  tests/{unit,integration,cache,kafka,firebase}/
 examples/              example client script
 infra/postgres/init/   first-run database init (creates the test database)
+infra/firebase-emulator/  optional local Firebase Auth emulator image
 docs/                  architecture and decisions
 ```
 
@@ -222,11 +272,16 @@ See [.env.example](.env.example).
 - `KAFKA_BOOTSTRAP_SERVERS` is `localhost:9094` from the host. Containers use `kafka:9092`, set in compose.
 - `REDIS_URL` is `redis://localhost:6379/0` from the host. The API container uses `redis://redis:6379/0`, set in compose.
 - `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` set the per-key limit. `RATE_LIMIT_FAIL_OPEN`, `IDEMPOTENCY_TTL_SECONDS` and `API_KEY_CACHE_TTL_SECONDS` are optional.
+- `FIREBASE_PROJECT_ID` enables sign-in for people. `FIREBASE_AUTH_EMULATOR_HOST` switches to the local emulator (never in production).
 - Real environment variables override `.env`, and `.env` is git-ignored. Never commit it.
 
 ## Known limitations
 
-- **Rate limiting is per API key, after authentication.** Requests with invalid credentials aren't limited (no per-IP limit yet), and each one with a well-formed but unknown key costs a database lookup.
+- **No invitations yet.** An organization has one user, its owner. Other members can only be added directly in the database until a later slice.
+- **No web frontend yet** (slice 3b). User endpoints can be called with any valid Firebase ID token.
+- **Token revocation isn't checked.** A Firebase ID token stays valid until it expires (up to an hour) even if the account is disabled in Firebase. Access still ends immediately when the membership is removed in this system.
+- **Users, organizations and projects can't be deleted or renamed** through the API yet.
+- **Rate limiting is per API key or user, after authentication.** Requests with invalid credentials aren't limited (no per-IP limit yet), and each one with a well-formed but unknown key costs a database lookup.
 - **Rate-limit bursts:** the fixed window allows up to twice the limit across a window boundary.
 - **Idempotency memory is 24 hours.** A key reused with different data after that, or while Redis is down, is caught by the consumer and dead-lettered instead of getting a 409.
 - **`last_used_at`** for an API key is updated when the key is loaded from the database, so it can lag by the cache TTL (60 s).

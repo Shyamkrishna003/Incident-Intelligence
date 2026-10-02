@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from incident_intel import __version__
 from incident_intel.api import health
+from incident_intel.auth.tokens import TokenVerifier, build_token_verifier
 from incident_intel.cache.services import CacheServices, build_redis_cache
 from incident_intel.core.config import Settings, get_settings
 from incident_intel.core.errors import install_exception_handlers
@@ -20,7 +21,9 @@ from incident_intel.db.session import create_engine, create_session_factory
 from incident_intel.ingestion.router import router as ingestion_router
 from incident_intel.streaming.producer import KafkaPublisher, MessagePublisher
 from incident_intel.streaming.topics import METRICS, topic_name
+from incident_intel.telemetry.router import project_router as telemetry_project_router
 from incident_intel.telemetry.router import router as telemetry_router
+from incident_intel.tenancy.console_router import router as console_router
 from incident_intel.tenancy.router import router as tenancy_router
 
 
@@ -29,6 +32,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
     await app.state.publisher.close()
     await app.state.cache.close()
+    await app.state.token_verifier.close()
     await app.state.engine.dispose()
 
 
@@ -37,9 +41,10 @@ def create_app(
     *,
     publisher: MessagePublisher | None = None,
     cache: CacheServices | None = None,
+    token_verifier: TokenVerifier | None = None,
 ) -> FastAPI:
-    """Build the API. ``publisher`` and ``cache`` can be injected (tests); by default
-    Kafka and Redis are used."""
+    """Build the API. ``publisher``, ``cache`` and ``token_verifier`` can be injected
+    (tests); by default Kafka, Redis and Firebase are used."""
     settings = settings or get_settings()
     configure_logging(level=settings.log_level, json=settings.log_json)
 
@@ -64,6 +69,7 @@ def create_app(
     )
     app.state.metrics_topic = topic_name(settings, METRICS)
     app.state.cache = cache or build_redis_cache(settings)
+    app.state.token_verifier = token_verifier or build_token_verifier(settings)
 
     install_exception_handlers(app)
     # Starlette runs the last-added middleware first: request context wraps everything,
@@ -75,4 +81,6 @@ def create_app(
     app.include_router(tenancy_router)
     app.include_router(ingestion_router)
     app.include_router(telemetry_router)
+    app.include_router(console_router)
+    app.include_router(telemetry_project_router)
     return app

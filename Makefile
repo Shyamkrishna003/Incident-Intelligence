@@ -5,7 +5,7 @@
 COMPOSE := docker compose
 VENV_BIN := ../.venv/bin
 
-.PHONY: help env venv lock db infra kafka-init up down logs migrate run consume dlq bootstrap test test-unit lint fmt typecheck check
+.PHONY: help env venv lock db infra emulator kafka-init up down logs migrate run consume dlq bootstrap test test-unit lint fmt typecheck check
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -35,6 +35,9 @@ db: ## Start PostgreSQL only
 infra: venv ## Start PostgreSQL + Kafka + Redis, create topics (enough for host-run API and tests)
 	$(COMPOSE) up -d --wait postgres kafka redis
 	cd backend && $(VENV_BIN)/ii kafka init
+
+emulator: ## Start the Firebase Auth emulator on localhost:9099 (optional; large first build)
+	$(COMPOSE) --profile emulator up -d --build --wait firebase-emulator
 
 kafka-init: venv ## Create missing Kafka topics
 	cd backend && $(VENV_BIN)/ii kafka init
@@ -68,7 +71,7 @@ test: venv ## Run all tests (needs `make infra`)
 	cd backend && $(VENV_BIN)/pytest
 
 test-unit: venv ## Run tests that need no PostgreSQL, Kafka, or Redis
-	cd backend && $(VENV_BIN)/pytest -m "not integration and not kafka and not redis"
+	cd backend && $(VENV_BIN)/pytest -m "not integration and not kafka and not redis and not firebase"
 
 lint: venv ## Lint and check formatting
 	cd backend && $(VENV_BIN)/ruff check src tests && $(VENV_BIN)/ruff format --check src tests

@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -67,3 +68,34 @@ class ApiKey(CreatedAtMixin, Base):
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class User(CreatedAtMixin, Base):
+    """A person. Identity is proven by Firebase; this row is our own record of them."""
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # The stable Firebase account id (the ID token's subject). Emails can change; this cannot.
+    firebase_uid: Mapped[str] = mapped_column(String(128), unique=True)
+    email: Mapped[str | None] = mapped_column(String(320))
+    email_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    display_name: Mapped[str | None] = mapped_column(String(200))
+
+
+class Membership(CreatedAtMixin, Base):
+    """A user's role in an organization. This table, not Firebase, decides authorization."""
+
+    __tablename__ = "memberships"
+    __table_args__ = (
+        CheckConstraint("role IN ('viewer', 'member', 'admin', 'owner')", name="role_valid"),
+        Index("ix_memberships_user_id", "user_id"),
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id", ondelete="RESTRICT"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(String(16))

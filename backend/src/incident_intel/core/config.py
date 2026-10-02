@@ -10,7 +10,7 @@ Settings are layered so each process receives only what it needs:
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
@@ -85,6 +85,30 @@ class Settings(RuntimeSettings):
     # How long a verified API key is cached (0 disables the cache). Also the longest a
     # revoked key could keep working if Redis is unreachable at the moment of revocation.
     api_key_cache_ttl_seconds: int = Field(default=60, ge=0, le=3600)
+
+    # Firebase Authentication proves who a human user is. Only the project ID is needed
+    # to verify ID tokens (it is their audience). Unset: user sign-in is unavailable.
+    firebase_project_id: str | None = Field(default=None, pattern=r"^[a-z0-9-]{4,40}$")
+    # Local development only: verify against the Firebase Auth emulator, which issues
+    # UNSIGNED tokens. Refused in production (see the validator below).
+    firebase_auth_emulator_host: str | None = None
+    # Abuse limit for self-service sign-up.
+    max_owned_organizations_per_user: int = Field(default=10, ge=1)
+
+    @field_validator("firebase_project_id", "firebase_auth_emulator_host", mode="before")
+    @classmethod
+    def _empty_means_unset(cls, value: object) -> object:
+        # `FIREBASE_PROJECT_ID=` in an env file arrives as an empty string.
+        return None if value == "" else value
+
+    @model_validator(mode="after")
+    def _no_emulator_in_production(self) -> "Settings":
+        if self.environment == "production" and self.firebase_auth_emulator_host:
+            raise ValueError(
+                "FIREBASE_AUTH_EMULATOR_HOST must not be set when ENVIRONMENT=production: "
+                "the emulator accepts unsigned tokens"
+            )
+        return self
 
 
 @lru_cache

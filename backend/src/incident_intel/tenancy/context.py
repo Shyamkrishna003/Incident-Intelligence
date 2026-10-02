@@ -13,13 +13,20 @@ class ApiKeyPrincipal:
 
 
 @dataclass(frozen=True)
-class TenantContext:
-    """The authenticated tenant scope of a request.
+class TenantScope:
+    """The organization and project a request may touch.
 
-    Derived only from verified credentials, never from request parameters. Every
-    tenant-owned query must be filtered by these identifiers.
+    Derived only from verified credentials (an API key, or a signed-in user's membership),
+    never from unchecked request parameters. Every tenant-owned query must be filtered by
+    these identifiers.
     """
 
     organization_id: uuid.UUID
     project_id: uuid.UUID
+
+
+@dataclass(frozen=True)
+class TenantContext(TenantScope):
+    """The tenant scope of a request authenticated with a project API key."""
+
     principal: ApiKeyPrincipal

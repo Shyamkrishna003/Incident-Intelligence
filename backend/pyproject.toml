@@ -18,6 +18,7 @@ dependencies = [
     "structlog>=24.4",
     "confluent-kafka>=2.15",
     "redis>=8.0",
+    "firebase-admin>=7.0",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +50,7 @@ markers = [
     "integration: requires the test PostgreSQL database",
     "kafka: requires a Kafka broker (TEST_KAFKA_BOOTSTRAP_SERVERS)",
     "redis: requires a Redis server (TEST_REDIS_URL)",
+    "firebase: requires the Firebase Auth emulator (TEST_FIREBASE_AUTH_EMULATOR_HOST)",
 ]
 addopts = "-ra --strict-markers"
 filterwarnings = ["error"]
@@ -82,3 +84,8 @@ exclude = ["src/incident_intel/migrations/versions/"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+# firebase-admin ships no type information; our wrapper (auth/tokens.py) is its only caller.
+module = ["firebase_admin", "firebase_admin.*"]
+ignore_missing_imports = true

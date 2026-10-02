@@ -26,7 +26,7 @@ from incident_intel.streaming.topics import ALL_TOPICS, METRICS, METRICS_DLQ, to
 from incident_intel.telemetry.consumer import MetricBatchHandler
 from incident_intel.telemetry.models import IngestBatch, MetricPoint
 from tests.conftest import TenantFactory, _TestEnvironment
-from tests.support import FakeCache
+from tests.support import FakeCache, FakeTokenVerifier
 
 pytestmark = [pytest.mark.integration, pytest.mark.kafka]
 
@@ -66,6 +66,7 @@ async def kafka_client(
         # Redis "down": these tests prove the pipeline's own guarantees (the storage
         # consumer's dedupe), which must hold without the API-edge idempotency check.
         cache=FakeCache(unavailable=True).services(),
+        token_verifier=FakeTokenVerifier(),
     )
 
     async def _test_session() -> AsyncIterator[AsyncSession]:

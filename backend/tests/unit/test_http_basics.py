@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from incident_intel.main import create_app
-from tests.support import FakeCache, FakePublisher, make_settings
+from tests.support import FakeCache, FakePublisher, FakeTokenVerifier, make_settings
 
 # Nothing listens on port 1, so connections are refused immediately.
 UNREACHABLE_DB = "postgresql+asyncpg://user:pw@127.0.0.1:1/unreachable_test"
@@ -19,6 +19,7 @@ async def offline_app() -> AsyncIterator[FastAPI]:
         make_settings(UNREACHABLE_DB, readiness_timeout_seconds=2.0),
         publisher=FakePublisher(),
         cache=FakeCache().services(),
+        token_verifier=FakeTokenVerifier(),
     )
     yield app
     await app.state.engine.dispose()

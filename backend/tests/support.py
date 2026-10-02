@@ -9,11 +9,13 @@ from typing import Any
 
 from pydantic import SecretStr
 
+from incident_intel.auth.tokens import VerifiedIdentity
 from incident_intel.cache.api_keys import CachedApiKey
 from incident_intel.cache.idempotency import ClaimOutcome, classify_existing
 from incident_intel.cache.rate_limit import RateLimitDecision, window_position
 from incident_intel.cache.services import CacheServices
 from incident_intel.core.config import Settings
+from incident_intel.core.errors import AuthenticationError, ServiceUnavailableError
 from incident_intel.streaming.producer import PublishError
 from incident_intel.telemetry.messages import (
     MetricBatchMessage,
@@ -29,6 +31,9 @@ def make_settings(database_url: str, **overrides: Any) -> Settings:
         "database_url": SecretStr(database_url),
         "api_key_pepper": SecretStr(TEST_PEPPER),
         "environment": "test",
+        # Explicit, so tests never pick these up from a developer's .env.
+        "firebase_project_id": None,
+        "firebase_auth_emulator_host": None,
         "log_json": True,
         **overrides,
     }
@@ -147,6 +152,46 @@ class FakeCache:
         return CacheServices(
             rate_limiter=self, idempotency=self, api_keys=self, ping=self.ping, close=self.close
         )
+
+
+@dataclass
+class FakeTokenVerifier:
+    """Stand-in for Firebase: `issue()` hands out a token for an identity; only issued
+    tokens verify. Can simulate the verification service being down."""
+
+    identities: dict[str, VerifiedIdentity] = field(default_factory=dict)
+    unavailable: bool = False
+
+    def issue(
+        self,
+        *,
+        uid: str | None = None,
+        email: str | None = None,
+        email_verified: bool = True,
+        display_name: str | None = None,
+        sign_in_provider: str = "password",
+    ) -> str:
+        uid = uid or f"uid-{uuid.uuid4().hex[:12]}"
+        token = f"test-token-{uuid.uuid4().hex}"
+        self.identities[token] = VerifiedIdentity(
+            uid=uid,
+            email=email if email is not None else f"{uid}@example.test",
+            email_verified=email_verified,
+            display_name=display_name,
+            sign_in_provider=sign_in_provider,
+        )
+        return token
+
+    async def verify(self, token: str) -> VerifiedIdentity:
+        if self.unavailable:
+            raise ServiceUnavailableError("Sign-in verification is temporarily unavailable.")
+        identity = self.identities.get(token)
+        if identity is None:
+            raise AuthenticationError("invalid_token")
+        return identity
+
+    async def close(self) -> None:
+        return None
 
 
 def metric_point(

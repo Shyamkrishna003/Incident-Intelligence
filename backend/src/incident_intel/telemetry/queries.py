@@ -8,10 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from incident_intel.core.errors import NotFoundError
 from incident_intel.telemetry.models import MetricPoint, MetricSeries, Service
-from incident_intel.tenancy.context import TenantContext
+from incident_intel.tenancy.context import TenantScope
 
 
-async def list_services(session: AsyncSession, ctx: TenantContext, *, limit: int) -> list[Service]:
+async def list_services(session: AsyncSession, ctx: TenantScope, *, limit: int) -> list[Service]:
     result = await session.scalars(
         select(Service)
         .where(
@@ -24,7 +24,7 @@ async def list_services(session: AsyncSession, ctx: TenantContext, *, limit: int
     return list(result)
 
 
-async def get_service(session: AsyncSession, ctx: TenantContext, name: str) -> Service:
+async def get_service(session: AsyncSession, ctx: TenantScope, name: str) -> Service:
     service = await session.scalar(
         select(Service).where(
             Service.organization_id == ctx.organization_id,
@@ -51,7 +51,7 @@ class MetricRange:
 
 async def read_metric_range(
     session: AsyncSession,
-    ctx: TenantContext,
+    ctx: TenantScope,
     *,
     service_name: str,
     metric_name: str,

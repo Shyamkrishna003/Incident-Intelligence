@@ -542,3 +542,39 @@ Verified on the running stack:
 - after Redis restarts, the API recovers on its own (`redis_unavailable` and `redis_recovered` are each logged once)
 
 Pinned: `redis` (Python client) 8.1.0, image `redis:8-alpine` (8.10.2 at implementation).
+
+---
+
+## 16. Slice 3a (users, sign-in, roles): implementation record
+
+People can now call the API. Firebase Authentication proves identity; PostgreSQL decides authorization.
+
+- **Migration `0003`:** `users` (Firebase UID, email, verified flag, display name) and `memberships` (organization, user, role).
+- **`auth/tokens.py`:** a `TokenVerifier` interface with a Firebase implementation (official `firebase-admin` SDK), a disabled one (no project ID configured), and a fake for tests.
+- **`tenancy/access.py`:** `authorize_organization` and `authorize_project` check the caller's membership and role. Non-members get 404; members with too low a role get 403.
+- **`tenancy/console_router.py`** and a second telemetry router: the user endpoints under `/v1/me`, `/v1/organizations` and `/v1/projects/{project_id}`.
+- **`TenantScope`:** the organization and project a request may touch. API-key requests and user requests both produce one, and the telemetry queries accept either.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Any user with a verified email may create an organization; invitations are left out | The recommended options from the plan. Each user may own at most 10 organizations, as an abuse limit. |
+| The SDK is given an explicit anonymous credential | Verifying a token needs only Google's public keys, but the SDK otherwise looks for Google application credentials and fails slowly without them. Found by a test. |
+| Authorization never uses Firebase custom claims | They can be up to an hour stale. Reading memberships from PostgreSQL on each request makes role changes immediate. |
+| Separate endpoints for API keys and users | A credential of one kind is never accepted where the other is expected, so there is no ambiguity about what a bearer token is. |
+| `revoke_api_key` takes an optional `project_id` | A user acting on one project can't revoke another project's key by guessing its prefix. |
+| The organization and its owner membership are created in one transaction | A user-created organization can't be left without an owner. |
+| The user row is written only on first sign-in or when the token's profile fields change | No database write on ordinary requests. |
+| Emulator mode is refused when `ENVIRONMENT=production` | The emulator accepts unsigned tokens and doesn't check expiry. |
+| The emulator is an optional Compose profile | The image is large, and a real Firebase project is available for development. |
+
+Costs:
+- `firebase-admin` adds 31 packages to the runtime lock (Google API, gRPC and Firestore clients come with it), which makes the image larger and its first build slower.
+
+Verified:
+- every role against every user endpoint, and 404 for other organizations' resources
+- a key created through the API works as a machine credential and stops working when revoked
+- against the real Firebase project ID: a forged token with the right audience and issuer is rejected after the SDK fetches Google's public keys (about 0.25 s once, then about 3 ms from cache); no user row is created and the token doesn't appear in logs
+
+Pinned: `firebase-admin` 7.7.0, `firebase-tools` 15.32.1 (emulator image).
