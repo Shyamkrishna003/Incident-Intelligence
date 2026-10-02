@@ -168,3 +168,32 @@ async def test_dead_letter_publish_failure_is_retried_not_skipped() -> None:
 )
 def test_retry_backoff_is_exponential_and_capped(attempt: int, expected: float) -> None:
     assert RetryPolicy().delay(attempt) == expected
+
+
+async def test_each_source_topic_can_have_its_own_dead_letter_topic() -> None:
+    stop = asyncio.Event()
+    messages = [
+        ConsumedMessage("logs", 0, 1, None, b"x", {}),
+        ConsumedMessage("metrics", 0, 2, None, b"y", {}),
+    ]
+    source = FakeSource(messages, stop)
+    publisher = FakePublisher()
+
+    async def always_permanent(_message: ConsumedMessage) -> None:
+        raise PermanentMessageError("invalid_message")
+
+    await asyncio.wait_for(
+        run_consumer(
+            source=source,
+            handler=always_permanent,
+            publisher=publisher,
+            dlq_topic={"logs": "logs.dlq", "metrics": "metrics.dlq"},
+            stop=stop,
+            retry=FAST_RETRY,
+            poll_timeout_seconds=0.01,
+        ),
+        timeout=5,
+    )
+
+    assert [m.topic for m in publisher.messages] == ["logs.dlq", "metrics.dlq"]
+    assert source.committed == [1, 2]

@@ -10,6 +10,7 @@ consumer commands load only runtime settings, so worker processes never hold API
 import argparse
 import asyncio
 import json
+import os
 import signal
 import sys
 from collections.abc import Sequence
@@ -29,8 +30,10 @@ from incident_intel.core.config import (
 from incident_intel.core.errors import AppError
 from incident_intel.core.logging import configure_logging
 from incident_intel.db.session import create_engine, create_session_factory
+from incident_intel.simulator.client import IngestClient, SimulatorError, build_http_client
+from incident_intel.simulator.runner import SimulationPlan, run_simulation
 from incident_intel.streaming.admin import ensure_topics, read_topic_from_start
-from incident_intel.streaming.topics import METRICS_DLQ, topic_name
+from incident_intel.streaming.topics import DEPLOYMENTS_DLQ, LOGS_DLQ, METRICS_DLQ, topic_name
 from incident_intel.telemetry.consumer import run_storage_consumer
 from incident_intel.tenancy.api_keys import DEFAULT_SCOPES, ApiKeyScope
 from incident_intel.tenancy.service import (
@@ -44,6 +47,8 @@ from incident_intel.tenancy.service import (
     validate_slug,
 )
 
+SIMULATOR_KEY_ENV = "SIMULATOR_API_KEY"
+_DLQ_TOPICS = {"metrics": METRICS_DLQ, "logs": LOGS_DLQ, "deployments": DEPLOYMENTS_DLQ}
 _KEY_WARNING = "Store this API key now; it cannot be shown again."
 
 
@@ -91,13 +96,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     dlq = commands.add_parser("dlq", help="Inspect dead-lettered messages")
     dlq_commands = dlq.add_subparsers(dest="dlq_command", required=True)
-    inspect = dlq_commands.add_parser("inspect", help="Show dead-lettered metric messages")
+    inspect = dlq_commands.add_parser("inspect", help="Show dead-lettered messages")
+    inspect.add_argument("--kind", choices=sorted(_DLQ_TOPICS), default="metrics")
     inspect.add_argument("--limit", type=int, default=20)
     inspect.add_argument(
         "--show-values",
         action="store_true",
         help="include a preview of each message body (contains customer telemetry)",
     )
+
+    simulate = commands.add_parser(
+        "simulate",
+        help="Send synthetic telemetry (a payment incident) through the ingestion API",
+        description=(
+            "Generates clearly labelled synthetic telemetry and sends it to the ingestion API. "
+            f"The API key is read from the {SIMULATOR_KEY_ENV} environment variable."
+        ),
+    )
+    simulate.add_argument("--api-url", default="http://localhost:8000")
+    simulate.add_argument("--backfill-minutes", type=int, default=60, help="history to send first")
+    simulate.add_argument(
+        "--incident-after-minutes",
+        type=int,
+        default=45,
+        help="minutes after the start of the backfill at which the incident begins",
+    )
+    simulate.add_argument("--no-incident", action="store_true", help="healthy baseline only")
+    simulate.add_argument("--step-seconds", type=int, default=15, help="sampling interval")
+    simulate.add_argument("--seed", type=int, default=1)
+    simulate.add_argument("--live", action="store_true", help="keep sending until interrupted")
 
     return parser
 
@@ -209,7 +236,7 @@ async def _consume(settings: RuntimeSettings) -> None:
 
 
 def _dlq_inspect(args: argparse.Namespace, settings: RuntimeSettings) -> None:
-    topic = topic_name(settings, METRICS_DLQ)
+    topic = topic_name(settings, _DLQ_TOPICS[args.kind])
     for message in read_topic_from_start(settings, topic, limit=args.limit):
         record = {
             "position": message.position,
@@ -221,6 +248,35 @@ def _dlq_inspect(args: argparse.Namespace, settings: RuntimeSettings) -> None:
         if args.show_values:
             record["value_preview"] = message.value[:500].decode("utf-8", errors="replace")
         print(json.dumps(record))
+
+
+async def _simulate(args: argparse.Namespace) -> None:
+    # Read from the environment, not a flag: command lines are visible to other users.
+    api_key = os.environ.get(SIMULATOR_KEY_ENV)
+    if not api_key:
+        raise SimulatorError(f"set {SIMULATOR_KEY_ENV} to a project API key with ingest:write")
+    if not 1 <= args.backfill_minutes <= 6 * 24 * 60:
+        raise SimulatorError("--backfill-minutes must be between 1 and 8640 (6 days)")
+    if args.step_seconds < 1:
+        raise SimulatorError("--step-seconds must be at least 1")
+    plan = SimulationPlan(
+        backfill=timedelta(minutes=args.backfill_minutes),
+        step=timedelta(seconds=args.step_seconds),
+        incident_after=None if args.no_incident else timedelta(minutes=args.incident_after_minutes),
+        seed=args.seed,
+        live=args.live,
+    )
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop.set)
+    async with build_http_client(args.api_url, api_key) as http:
+        summary = await run_simulation(IngestClient(http), plan, stop=stop)
+    print(
+        f"Sent synthetic telemetry: {summary.points} metric points, {summary.records} log "
+        f"records, {summary.deployments} deployments in {summary.requests} requests.",
+        file=sys.stderr,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -238,8 +294,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             asyncio.run(_consume(settings))
         elif args.command == "dlq":
             _dlq_inspect(args, settings)
+        elif args.command == "simulate":
+            asyncio.run(_simulate(args))
     except AppError as exc:
         print(f"error: {exc.message}", file=sys.stderr)
+        return 1
+    except SimulatorError as exc:
+        print(f"error: {exc}", file=sys.stderr)
         return 1
     except KafkaException as exc:
         print(f"error: kafka: {exc.args[0].str()}", file=sys.stderr)

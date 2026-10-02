@@ -67,6 +67,9 @@ export function AppShell({
             <NavLink to={`${base}/services`} className={navClass}>
               Services
             </NavLink>
+            <NavLink to={`${base}/deployments`} className={navClass}>
+              Deployments
+            </NavLink>
             {roleAtLeast(current.organization.role, "admin") && (
               <NavLink to={`${base}/api-keys`} className={navClass}>
                 API keys

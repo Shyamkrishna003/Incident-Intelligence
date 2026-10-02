@@ -74,6 +74,42 @@ export interface MetricRange {
   series: MetricSeries[];
 }
 
+export type Severity = "trace" | "debug" | "info" | "warn" | "error" | "fatal";
+
+export interface LogRecord {
+  timestamp: string;
+  severity: Severity;
+  /** Stored exactly as the service sent it: untrusted text, rendered as text only. */
+  message: string;
+  attributes: Record<string, string>;
+  trace_id: string | null;
+}
+
+export interface LogList {
+  service: string;
+  start: string;
+  end: string;
+  truncated: boolean;
+  records: LogRecord[];
+}
+
+export interface Deployment {
+  id: string;
+  service: string;
+  version: string;
+  deployed_at: string;
+  commit_sha: string | null;
+  environment: string | null;
+  deployed_by: string | null;
+  description: string | null;
+}
+
+export interface DeploymentList {
+  start: string;
+  end: string;
+  deployments: Deployment[];
+}
+
 export type ApiKeyScope = "ingest:write" | "telemetry:read";
 
 export interface ApiKey {

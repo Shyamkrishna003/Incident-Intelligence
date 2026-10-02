@@ -45,3 +45,40 @@ class MetricRangeResponse(BaseModel):
     # True when more points exist in the range than `limit` allowed; narrow the range.
     truncated: bool
     series: list[SeriesOut]
+
+
+class LogRecordOut(BaseModel):
+    timestamp: datetime
+    severity: str
+    # Stored as received from the service: untrusted text.
+    message: str
+    attributes: dict[str, str]
+    trace_id: str | None
+
+
+class LogListResponse(BaseModel):
+    service: str
+    start: datetime
+    end: datetime
+    # True when more records match than `limit` allowed; narrow the range or the filters.
+    truncated: bool
+    # Newest first.
+    records: list[LogRecordOut]
+
+
+class DeploymentOut(BaseModel):
+    id: uuid.UUID
+    service: str
+    version: str
+    deployed_at: datetime
+    commit_sha: str | None
+    environment: str | None
+    deployed_by: str | None
+    description: str | None
+
+
+class DeploymentListResponse(BaseModel):
+    start: datetime
+    end: datetime
+    # Newest first.
+    deployments: list[DeploymentOut]

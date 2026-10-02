@@ -22,8 +22,15 @@ from incident_intel.main import create_app
 from incident_intel.streaming.admin import delete_topics, ensure_topics, read_topic_from_start
 from incident_intel.streaming.consumer import ConsumedMessage, KafkaMessageSource, run_consumer
 from incident_intel.streaming.producer import KafkaPublisher
-from incident_intel.streaming.topics import ALL_TOPICS, METRICS, METRICS_DLQ, topic_name
-from incident_intel.telemetry.consumer import MetricBatchHandler
+from incident_intel.streaming.topics import (
+    ALL_TOPICS,
+    LOGS,
+    LOGS_DLQ,
+    METRICS,
+    METRICS_DLQ,
+    topic_name,
+)
+from incident_intel.telemetry.consumer import dead_letter_topics, storage_handler
 from incident_intel.telemetry.models import IngestBatch, MetricPoint
 from tests.conftest import TenantFactory, _TestEnvironment
 from tests.support import FakeCache, FakeTokenVerifier
@@ -85,10 +92,12 @@ async def _consume(
     *,
     expected: int,
 ) -> None:
-    """Run the real storage consumer until ``expected`` messages were handled."""
+    """Run the real storage consumer (all telemetry topics) until ``expected`` messages
+    were handled."""
     stop = asyncio.Event()
     handled = 0
-    store = MetricBatchHandler(session_factory)
+    store = storage_handler(settings, session_factory)
+    dead_letters = dead_letter_topics(settings)
 
     async def handler(message: ConsumedMessage) -> None:
         nonlocal handled
@@ -100,7 +109,7 @@ async def _consume(
                 stop.set()
 
     source = KafkaMessageSource(
-        settings, group_id=f"test-{uuid.uuid4().hex}", topics=[topic_name(settings, METRICS)]
+        settings, group_id=f"test-{uuid.uuid4().hex}", topics=sorted(dead_letters)
     )
     try:
         await asyncio.wait_for(
@@ -108,7 +117,7 @@ async def _consume(
                 source=source,
                 handler=handler,
                 publisher=publisher,
-                dlq_topic=topic_name(settings, METRICS_DLQ),
+                dlq_topic=dead_letters,
                 stop=stop,
                 poll_timeout_seconds=0.5,
             ),
@@ -222,3 +231,55 @@ async def test_missing_topics_reports_only_absent_topics(
     )
 
     assert missing == {"does-not-exist-anywhere"}
+
+
+async def test_logs_and_deployments_flow_through_their_own_topics(
+    kafka_settings: Settings,
+    kafka_client: AsyncClient,
+    kafka_publisher: KafkaPublisher,
+    session_factory: async_sessionmaker[AsyncSession],
+    make_tenant: TenantFactory,
+) -> None:
+    tenant = await make_tenant()
+    now = datetime.now(UTC).replace(microsecond=0)
+    stamp = (now - timedelta(seconds=30)).isoformat()
+
+    logs = await kafka_client.post(
+        "/v1/ingest/logs",
+        json={
+            "records": [
+                {
+                    "service": "payment-api",
+                    "timestamp": stamp,
+                    "severity": "error",
+                    "message": "boom",
+                }
+            ]
+        },
+        headers={**tenant.auth_headers, "Idempotency-Key": "e2e"},
+    )
+    deployments = await kafka_client.post(
+        "/v1/ingest/deployments",
+        json={
+            "deployments": [{"service": "payment-api", "version": "2.43.0", "deployed_at": stamp}]
+        },
+        # The same Idempotency-Key as the log batch: different kinds must not collide.
+        headers={**tenant.auth_headers, "Idempotency-Key": "e2e"},
+    )
+    assert (logs.status_code, deployments.status_code) == (202, 202)
+    assert logs.json()["batch_id"] != deployments.json()["batch_id"]
+    # A malformed message on the logs topic must go to the logs dead-letter topic.
+    logs_topic = topic_name(kafka_settings, LOGS)
+    await kafka_publisher.publish(logs_topic, key=b"bad", value=b"{}")
+
+    await _consume(kafka_settings, session_factory, kafka_publisher, expected=3)
+
+    read_logs = await kafka_client.get("/v1/services/payment-api/logs", headers=tenant.auth_headers)
+    assert [r["message"] for r in read_logs.json()["records"]] == ["boom"]
+    read_deployments = await kafka_client.get("/v1/deployments", headers=tenant.auth_headers)
+    assert [d["version"] for d in read_deployments.json()["deployments"]] == ["2.43.0"]
+    [dead] = await asyncio.to_thread(
+        read_topic_from_start, kafka_settings, topic_name(kafka_settings, LOGS_DLQ), limit=10
+    )
+    assert dead.headers["dlq.reason"] == "invalid_message"
+    assert dead.headers["dlq.source"].startswith(f"{logs_topic}/")

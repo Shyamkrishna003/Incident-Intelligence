@@ -1,9 +1,10 @@
 import { Link, useParams, useSearchParams } from "react-router-dom";
 
 import type { ProjectContext } from "../components/AppShell";
+import { LogsPanel } from "../components/LogsPanel";
 import { MetricChart } from "../components/MetricChart";
 import { Card, EmptyState, ErrorState, LoadingState, PageHeader } from "../components/ui";
-import { useMetricRange, useMetrics } from "../hooks/queries";
+import { useDeployments, useMetricRange, useMetrics } from "../hooks/queries";
 
 const RANGES = [
   { minutes: 15, label: "15 min" },
@@ -29,6 +30,8 @@ export function ServicePage({ current }: { current: ProjectContext }) {
     null;
 
   const range = useMetricRange(current.project.id, service, metric, rangeMinutes);
+  // Marked on the chart. If this fails the chart still renders, just without markers.
+  const deployments = useDeployments(current.project.id, rangeMinutes, service);
 
   function update(next: { metric?: string; range?: number }) {
     const updated = new URLSearchParams(params);
@@ -54,28 +57,26 @@ export function ServicePage({ current }: { current: ProjectContext }) {
           error={metrics.error}
           onRetry={() => void metrics.refetch()}
         />
-      ) : metric === null ? (
-        <EmptyState title="No metrics yet">
-          <p>This service has not reported any metrics.</p>
-        </EmptyState>
       ) : (
         <>
-          {/* Filters sit in one row above the chart they scope. */}
+          {/* Filters sit in one row above everything they scope. */}
           <div className="mb-4 flex flex-wrap items-end gap-4">
-            <label className="flex flex-col gap-1 text-sm font-medium text-ink">
-              Metric
-              <select
-                className="rounded-md border border-hairline bg-surface px-2 py-1.5 text-sm font-normal text-ink"
-                value={metric}
-                onChange={(event) => { update({ metric: event.target.value }); }}
-              >
-                {metrics.data.map((item) => (
-                  <option key={item.name} value={item.name}>
-                    {item.name}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {metric !== null && (
+              <label className="flex flex-col gap-1 text-sm font-medium text-ink">
+                Metric
+                <select
+                  className="rounded-md border border-hairline bg-surface px-2 py-1.5 text-sm font-normal text-ink"
+                  value={metric}
+                  onChange={(event) => { update({ metric: event.target.value }); }}
+                >
+                  {metrics.data.map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {item.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
 
             <fieldset>
               <legend className="mb-1 text-sm font-medium text-ink">Time range</legend>
@@ -99,20 +100,32 @@ export function ServicePage({ current }: { current: ProjectContext }) {
             </fieldset>
           </div>
 
-          <Card>
-            <h2 className="mb-3 text-base font-semibold text-ink">{metric}</h2>
-            {range.isPending ? (
-              <LoadingState label="Loading data…" />
-            ) : range.isError ? (
-              <ErrorState
-                title="Could not load this metric"
-                error={range.error}
-                onRetry={() => void range.refetch()}
-              />
-            ) : (
-              <MetricChart data={range.data} stale={range.isPlaceholderData} />
-            )}
-          </Card>
+          {metric === null ? (
+            <EmptyState title="No metrics yet">
+              <p>This service has not reported any metrics.</p>
+            </EmptyState>
+          ) : (
+            <Card>
+              <h2 className="mb-3 text-base font-semibold text-ink">{metric}</h2>
+              {range.isPending ? (
+                <LoadingState label="Loading data…" />
+              ) : range.isError ? (
+                <ErrorState
+                  title="Could not load this metric"
+                  error={range.error}
+                  onRetry={() => void range.refetch()}
+                />
+              ) : (
+                <MetricChart
+                  data={range.data}
+                  stale={range.isPlaceholderData}
+                  deployments={deployments.data ?? []}
+                />
+              )}
+            </Card>
+          )}
+
+          <LogsPanel projectId={current.project.id} service={service} rangeMinutes={rangeMinutes} />
         </>
       )}
     </>

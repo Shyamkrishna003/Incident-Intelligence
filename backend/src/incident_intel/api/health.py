@@ -93,7 +93,11 @@ async def readyz(request: Request, response: Response) -> ReadinessResponse:
         check_database(
             state.engine, expected_head=state.expected_migration_head, timeout_seconds=timeout
         ),
-        check_kafka(state.publisher, topics=[state.metrics_topic], timeout_seconds=timeout),
+        check_kafka(
+            state.publisher,
+            topics=[state.metrics_topic, state.logs_topic, state.deployments_topic],
+            timeout_seconds=timeout,
+        ),
         check_redis(state.cache.ping),
     )
     required = {**database, **kafka}

@@ -4,12 +4,15 @@ import type {
   ApiKey,
   ApiKeyCreated,
   ApiKeyScope,
+  DeploymentList,
+  LogList,
   Me,
   Metric,
   MetricRange,
   OrganizationCreated,
   Project,
   Service,
+  Severity,
 } from "./types";
 
 export interface ErrorDetail {
@@ -145,6 +148,37 @@ export const api = {
     });
     return request<MetricRange>(
       `/v1/projects/${seg(projectId)}/services/${seg(service)}/metrics/${seg(metric)}?${query.toString()}`,
+    );
+  },
+
+  listLogs: (
+    projectId: string,
+    service: string,
+    filter: { start: Date; end: Date; severity: Severity | null; search: string },
+  ) => {
+    const query = new URLSearchParams({
+      start: filter.start.toISOString(),
+      end: filter.end.toISOString(),
+      limit: "200",
+    });
+    if (filter.severity) query.set("severity", filter.severity);
+    if (filter.search) query.set("q", filter.search);
+    return request<LogList>(
+      `/v1/projects/${seg(projectId)}/services/${seg(service)}/logs?${query.toString()}`,
+    );
+  },
+
+  listDeployments: (
+    projectId: string,
+    filter: { start: Date; end: Date; service?: string },
+  ) => {
+    const query = new URLSearchParams({
+      start: filter.start.toISOString(),
+      end: filter.end.toISOString(),
+    });
+    if (filter.service) query.set("service", filter.service);
+    return request<DeploymentList>(
+      `/v1/projects/${seg(projectId)}/deployments?${query.toString()}`,
     );
   },
 

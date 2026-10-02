@@ -20,7 +20,9 @@ from incident_intel.db.migrations import head_revision
 from incident_intel.db.session import create_engine, create_session_factory
 from incident_intel.ingestion.router import router as ingestion_router
 from incident_intel.streaming.producer import KafkaPublisher, MessagePublisher
-from incident_intel.streaming.topics import METRICS, topic_name
+from incident_intel.streaming.topics import DEPLOYMENTS, LOGS, METRICS, topic_name
+from incident_intel.telemetry.event_router import project_router as event_project_router
+from incident_intel.telemetry.event_router import router as event_router
 from incident_intel.telemetry.router import project_router as telemetry_project_router
 from incident_intel.telemetry.router import router as telemetry_router
 from incident_intel.tenancy.console_router import router as console_router
@@ -68,6 +70,8 @@ def create_app(
         settings, delivery_timeout_seconds=settings.kafka_produce_timeout_seconds
     )
     app.state.metrics_topic = topic_name(settings, METRICS)
+    app.state.logs_topic = topic_name(settings, LOGS)
+    app.state.deployments_topic = topic_name(settings, DEPLOYMENTS)
     app.state.cache = cache or build_redis_cache(settings)
     app.state.token_verifier = token_verifier or build_token_verifier(settings)
 
@@ -83,4 +87,6 @@ def create_app(
     app.include_router(telemetry_router)
     app.include_router(console_router)
     app.include_router(telemetry_project_router)
+    app.include_router(event_router)
+    app.include_router(event_project_router)
     return app

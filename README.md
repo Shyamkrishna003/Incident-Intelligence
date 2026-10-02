@@ -10,7 +10,7 @@ AI-assisted incident detection, investigation, root-cause analysis, and reliabil
 
 ## Status
 
-Implemented through **slice 3b: metric ingestion (the *Observe* stage), sign-in for people, and a web app**:
+Implemented through **slice 4: the complete *Observe* stage (metrics, logs and deployments), sign-in for people, a web app, and a scenario simulator**:
 
 - **Foundation (slice 1):**
   - FastAPI backend with typed configuration, structured JSON logs (with secret redaction), and request IDs.
@@ -39,25 +39,32 @@ Implemented through **slice 3b: metric ingestion (the *Observe* stage), sign-in 
   - Browse services and chart their metrics over 15 minutes to 24 hours, with a table view of the same data.
   - Admins create and revoke API keys. A new key is shown once.
 
-Next come logs and deployments, detection and AI investigation. See the architecture doc, §11.
+- **Logs, deployments and a simulator (slice 4):**
+  - Services send log records and deployment events through the same pipeline as metrics.
+  - Logs can be read per service, filtered by severity and text. Deployments can be read per project.
+  - The web app shows a service's logs under its chart, marks deployments on the chart, and lists deployments.
+  - `ii simulate` generates a clearly labelled synthetic incident and sends it through the real ingestion API.
+
+Next come detection, incidents and AI investigation. See the architecture doc, §11.
 
 ## How ingestion works
 
 ```
-service ──POST /v1/ingest/metrics──► API ── validate, stamp tenant ids ──► Kafka topic
-          (API key, Idempotency-Key)  │                                  telemetry.metrics.v1
-                                      │ 202 once Kafka acknowledged              │
-                                      ▼                                          ▼
-                                                               storage consumer ──► PostgreSQL
-                                                                   │ (commit offset only
-                                                                   │  after the DB commit)
-                                                                   └─► telemetry.metrics.v1.dlq
-                                                                       (messages that can never
-                                                                        be stored)
+service ──POST /v1/ingest/{metrics,logs,deployments}──► API ── validate, stamp tenant ids
+          (API key, Idempotency-Key)                     │
+                                                         │ 202 once Kafka acknowledged
+                                                         ▼
+                              Kafka topics telemetry.{metrics,logs,deployments}.v1
+                                                         │
+                                                         ▼
+                                    storage consumer ──► PostgreSQL
+                                        │ (commit offset only after the DB commit)
+                                        └─► <topic>.dlq (messages that can never be stored)
 ```
 
 - **Tenant safety.** The organization and project come from the verified API key and are stamped onto the Kafka message. The request body can't set them, and the database rejects rows whose project doesn't match their parent's.
 - **No duplicates.** The `batch_id` is derived from the project and the `Idempotency-Key`, so a retried request maps to the same batch. The API remembers each key in Redis for 24 hours: a retry of a published batch returns the same answer without a second Kafka message, and different data under the same key gets a 409. Independently of Redis, the consumer skips batches it has already stored, and each point is unique on (series, timestamp).
+- **One path for all three.** Metrics, logs and deployments differ only in their validation rules, message type and topic. An `Idempotency-Key` is scoped to its kind, so the same key can be used for a metric batch and a log batch.
 - **Asynchronous.** A 202 means the batch is safely in Kafka. It becomes readable after the consumer stores it, normally within a second.
 
 ### Failure behavior
@@ -76,14 +83,40 @@ service ──POST /v1/ingest/metrics──► API ── validate, stamp tenant
 
 - **Responsibility:** the durable buffer between accepting telemetry and storing it. It decouples the two, lets consumers replay after an outage, and lets several consumers read the same stream (detection joins in a later slice).
 - **Topics:**
-  - `telemetry.metrics.v1`: 6 partitions, keyed by project, 3-day retention.
-  - `telemetry.metrics.v1.dlq`: 1 partition, 14-day retention.
-  - Both have a 2 MiB max message size.
+  - `telemetry.metrics.v1` and `telemetry.logs.v1`: 6 partitions each, keyed by project, 3-day retention.
+  - `telemetry.deployments.v1`: 1 partition, 7-day retention.
+  - Each has a dead-letter topic named `<topic>.dlq`: 1 partition, 14-day retention.
+  - All have a 2 MiB max message size.
   - Topics are created by `ii kafka init`. The broker never auto-creates them.
 - **Local setup:**
   - A single broker in KRaft mode (no ZooKeeper), with the JVM heap capped at 512 MB.
   - It runs PLAINTEXT, without authentication, and is published on localhost only. TLS, SASL and ACLs come with deployment hardening.
 - **Operating cost:** one more service to run and monitor. Consumer lag is the key health metric (Prometheus arrives in the hardening slice).
+
+## Scenario simulator
+
+`ii simulate` produces a synthetic incident modelled on the PRD's example and sends it through the real ingestion API, so detection and investigation can be built and evaluated without production data.
+
+```bash
+SIMULATOR_API_KEY=ii_... make simulate                  # the last 60 minutes; incident starts 45 minutes in
+SIMULATOR_API_KEY=ii_... make simulate ARGS="--live"    # then keep sending until Ctrl+C
+SIMULATOR_API_KEY=ii_... make simulate ARGS="--no-incident --backfill-minutes 180"   # healthy baseline
+```
+
+The scenario, relative to the incident start `T`:
+
+| When | What happens |
+|---|---|
+| before `T` | Four services (`payment-api`, `payments-db`, `checkout-web`, `inventory-api`) are healthy, with small random variation. |
+| `T − 25 min` | `inventory-api` deploys 1.8.2. It's unrelated: a deliberate red herring. |
+| `T` | `payment-api` deploys 2.43.0. |
+| `T` to `T + 10 min` | Database query time and sequential scans climb, the connection pool fills, and `payment-api` latency and errors rise. `checkout-web` follows about two minutes later. `inventory-api` stays healthy. Warning and error logs appear. |
+| `T + 20 min` | `payment-api` rolls back to 2.42.3, and everything recovers over five minutes. |
+
+- **Always labelled.** Every metric series and log record carries `source=simulator`, and deployments have `deployed_by: simulator` and say "synthetic" in their description.
+- **Deterministic.** The same `--seed` and time period produce identical data, so re-running over the same period is recognized as a retry and stores nothing twice.
+- **The API key** is read from the `SIMULATOR_API_KEY` environment variable, not a flag, because command lines are visible to other users on the machine. It needs the `ingest:write` scope.
+- The simulator waits and retries when the API answers 429 or 503.
 
 ## Two kinds of caller
 
@@ -92,7 +125,7 @@ service ──POST /v1/ingest/metrics──► API ── validate, stamp tenant
 | Credential | Project API key: `Authorization: Bearer ii_...` | Firebase ID token: `Authorization: Bearer <token>` |
 | Scope | Exactly one project, fixed by the key | Every organization the user is a member of |
 | Permissions | Key scopes: `ingest:write`, `telemetry:read` | Role in the organization (below) |
-| Endpoints | `/v1/project`, `/v1/ingest/...`, `/v1/services/...` | `/v1/me`, `/v1/organizations/...`, `/v1/projects/...` |
+| Endpoints | `/v1/project`, `/v1/ingest/...`, `/v1/services/...`, `/v1/deployments` | `/v1/me`, `/v1/organizations/...`, `/v1/projects/...` |
 
 The two are not interchangeable: an API key is rejected on user endpoints, and an ID token on key endpoints.
 
@@ -178,7 +211,8 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | Sign in | Email/password, Google or GitHub. If the email already belongs to an account with a different method, the app asks the user to sign in the original way and then links the new method. |
 | Setup | Shown until the user can reach a project. Asks for email verification first, then creates an organization and its first project. If setup was interrupted after the organization was created, it asks only for the project. |
 | Services | The services that have sent telemetry to the selected project. Refreshes when opened and every 30 seconds. |
-| Service | Pick a metric and a time range (15 minutes to 24 hours). One line per series (attribute set), a legend, a hover readout of every series, and the same values as a table. Refreshes every 30 seconds. |
+| Service | Pick a metric and a time range (15 minutes to 24 hours). One line per series (attribute set), a legend, a hover readout of every series, and the same values as a table. Deployments of the service are marked on the chart. Below it, the service's logs for the same time range, filterable by severity and text. Refreshes every 30 seconds. |
+| Deployments | The project's deployments in the last 7 days, newest first, each linking to its service. |
 | API keys | Admins and owners only. Create a key (shown once, with a copy button) and revoke keys after confirmation. |
 
 - Every screen has loading, empty and error states. Errors show the server's message and a retry button.
@@ -194,6 +228,10 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | GET | `/readyz` | none | Readiness. Returns 200 when the DB is reachable and migrated and Kafka is reachable with its topics, and 503 naming the failing check otherwise. Redis is reported but not required. |
 | GET | `/v1/project` | API key | The organization, project, and key the credential belongs to |
 | POST | `/v1/ingest/metrics` | API key with `ingest:write` | Accepts 1–1000 points (body ≤ 1 MiB). Requires an `Idempotency-Key` header. Returns **202** with `batch_id`, or **409** if the key was already used with different data. |
+| POST | `/v1/ingest/logs` | API key with `ingest:write` | Accepts 1–1000 log records. Same headers, status codes and delivery behaviour as metrics. |
+| POST | `/v1/ingest/deployments` | API key with `ingest:write` | Accepts 1–100 deployment events (service, version, time; optional commit, environment, who, description). |
+| GET | `/v1/services/{service}/logs` | API key with `telemetry:read` | Log records in `[start, end)` (default: the last hour; at most 24 h), newest first. `severity` returns that level and above; `q` matches text in the message; `limit` is at most 1000. |
+| GET | `/v1/deployments` | API key with `telemetry:read` | Deployments in `[start, end)` (default: the last 7 days; at most 31), newest first. `service` filters to one service. |
 | GET | `/v1/services` | API key with `telemetry:read` | Services that have sent telemetry to this project |
 | GET | `/v1/me` | signed-in user | The user, their organizations and roles, and each organization's projects. Creates the user record on first call. |
 | POST | `/v1/organizations` | signed-in user, verified email | Create an organization. The caller becomes its owner. |
@@ -203,6 +241,8 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | DELETE | `/v1/projects/{project_id}/api-keys/{prefix}` | admin or owner | Revoke a key of this project. Takes effect immediately. |
 | GET | `/v1/projects/{project_id}/services` | any member | Services in the project |
 | GET | `/v1/projects/{project_id}/services/{service}/metrics/{metric}` | any member | Metric points, same parameters as the API-key endpoint |
+| GET | `/v1/projects/{project_id}/services/{service}/logs` | any member | Log records, same parameters as the API-key endpoint |
+| GET | `/v1/projects/{project_id}/deployments` | any member | Deployments, same parameters as the API-key endpoint |
 | GET | `/v1/services/{service}/metrics` | API key with `telemetry:read` | The metrics a service has reported, with the number of series each has. Also at `/v1/projects/{project_id}/services/{service}/metrics` for signed-in users. |
 | GET | `/v1/services/{service}/metrics/{metric}` | API key with `telemetry:read` | Points in `[start, end)` (default: the last hour; at most 24 h), grouped by attribute set. `limit` defaults to 1000 and can be at most 10 000; `truncated` is true if more points exist. |
 
@@ -213,6 +253,9 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 - **Timestamps:** `timestamp` must include a timezone and fall within the last 7 days or at most 5 minutes in the future. Timestamps are stored in UTC.
 - **Attributes:** at most 16 string pairs, with keys up to 64 characters and values up to 256.
 - **Whole-batch validation:** a batch is accepted or rejected as a whole. Any invalid point rejects it with 422, and `details` lists each problem by position. Duplicate points in one batch (same series and timestamp) are rejected too.
+- **Logs:** `severity` is one of `trace`, `debug`, `info` (the default), `warn`, `error`, `fatal`. `message` is 1 to 8192 characters. `trace_id` is optional (32 lowercase hex characters). Identical lines at the same instant are kept.
+- **Deployments:** `version` is up to 128 characters without spaces. `commit_sha` is 7 to 40 lowercase hex characters. The same service, version and time reported again, even in a different batch, is stored once.
+- **Log content is stored as received.** Don't send secrets or personal data in log messages. The API and the web app treat messages as untrusted text.
 - **Duplicates across batches:** points already stored for the same series and timestamp are skipped. The first write wins.
 
 ### Errors
@@ -236,7 +279,8 @@ ii api-keys list   --org acme --project payments
 ii api-keys revoke --prefix <12-char prefix>
 ii kafka init                      # create missing topics (existing ones are left unchanged)
 ii consume storage                 # run the storage consumer until SIGTERM/SIGINT
-ii dlq inspect [--limit 20] [--show-values]   # dead-lettered messages; bodies hidden by default
+ii dlq inspect [--kind metrics|logs|deployments] [--limit 20] [--show-values]   # bodies hidden by default
+ii simulate [--live] [--no-incident] [--backfill-minutes 60] [--incident-after-minutes 45] [--seed 1]
 ```
 
 - The plaintext API key is written to **stdout once**. Messages and logs go to stderr, so `KEY=$(ii api-keys create ...)` captures just the key.
@@ -286,7 +330,8 @@ backend/
     cache/       Redis: gateway with circuit breaker, rate limiter, idempotency claims, API-key cache
     streaming/   Kafka: topics, async publisher, consumer loop with dead-lettering, admin
     ingestion/   ingestion API: schemas, normalization, publishing
-    telemetry/   message contract, models, idempotent storage consumer, read API
+    telemetry/   message contracts, models, idempotent storage consumer, read APIs
+    simulator/   synthetic incident scenario, sender, backfill and live runner
     migrations/  Alembic environment and revisions (shipped inside the package)
     cli.py       `ii` admin CLI
   tests/{unit,integration,cache,kafka,firebase}/
@@ -328,9 +373,13 @@ See [.env.example](.env.example).
 - **Rate-limit bursts:** the fixed window allows up to twice the limit across a window boundary.
 - **Idempotency memory is 24 hours.** A key reused with different data after that, or while Redis is down, is caught by the consumer and dead-lettered instead of getting a 409.
 - **`last_used_at`** for an API key is updated when the key is loaded from the database, so it can lag by the cache TTL (60 s).
+- **No retention job.** Logs and metrics are kept indefinitely for now; the planned limits (7 days for logs, 30 for metrics) aren't enforced yet.
+- **Log search is a plain text match** within one service and time range, with no index. It's fine at this volume and will need revisiting at higher volume.
+- **Log queries return the newest matches only** (up to `limit`), with no paging to older ones.
+- **No traces, and no service dependencies yet.** Dependencies arrive with incident correlation, where they're first used.
+- **The simulator has one scenario** (the payment incident) and one healthy baseline.
 - **Hot partitions:** Kafka messages are keyed by project, so one project's batches are processed in order but by a single consumer at a time. This is a throughput ceiling for very large tenants, revisited if measurements show it.
 - **Units:** a series records its unit from its first point. A different unit later isn't flagged.
-- **No retention job:** PostgreSQL metric data isn't yet deleted after the planned 30 days.
 - **Consumer monitoring:** the storage consumer has no health endpoint, and consumer lag isn't yet exported (hardening slice).
 - **Topic config:** `ii kafka init` doesn't reconcile the settings of topics that already exist.
 - **Pepper rotation:** rotating the API-key pepper isn't supported, because hashes aren't versioned yet.

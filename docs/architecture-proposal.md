@@ -611,3 +611,39 @@ Verified in a real browser (Chrome, driven by a script, against the Firebase emu
 - no failed API requests and no page errors
 
 Not verified: sign-in with real Google and GitHub accounts, and the account-linking flow against real providers.
+
+---
+
+## 18. Slice 4 (logs, deployments, simulator): implementation record
+
+The *Observe* stage now covers metrics, logs and deployments, and there is a repeatable source of test telemetry.
+
+- **Ingestion:** `POST /v1/ingest/logs` and `POST /v1/ingest/deployments`, sharing one code path with metrics (`ingestion/service.py`). Only validation, message type and topic differ.
+- **Kafka:** topics `telemetry.logs.v1` and `telemetry.deployments.v1`, each with its own dead-letter topic. One storage consumer subscribes to all three telemetry topics and routes by topic.
+- **Storage (migration `0004`):** `log_records`, `deployments`, and a `kind` column on `ingest_batches`.
+- **Reads:** logs per service (severity and text filters) and deployments per project, for API keys and for signed-in users.
+- **Simulator:** `simulator/scenario.py` (pure functions of time), `client.py` (sender) and `runner.py` (backfill and live modes), behind `ii simulate`.
+- **Web app:** logs panel and deployment markers on the service page, and a deployments page.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Logs stay in PostgreSQL | As planned for the MVP. One store, tenant-scoped the same way as everything else. Revisit (for example Loki) when volume requires it. |
+| Logs are deduplicated per batch only | Log lines have no natural identity, and identical lines at the same instant are legitimate. The batch claim and the records are written in one transaction, so a redelivered batch stores nothing twice. |
+| Deployments are also unique on (project, service, version, time) | A retried CI job may report the same deployment under a new idempotency key. |
+| Idempotency keys are scoped per kind (`logs/<key>`, `deployments/<key>`) | The same key on two endpoints must not collide. Metrics keep the bare key, so existing batch ids are unchanged. A client key can't contain `/`, so the scopes can't overlap. |
+| Deployments go through Kafka too, on a single partition | The detection and correlation consumers will read them from the stream, in order. The volume is tiny. |
+| The consumer's dead-letter target is a mapping from source topic | Each topic keeps its own dead-letter topic. A missing mapping entry is retried and logged, never dropped. |
+| Severity is stored as an OpenTelemetry-style number | "This level and above" is a simple comparison, and OTLP ingestion can map onto it later. |
+| Service dependencies are deferred to the correlation slice | Nothing uses them yet. |
+| The simulator's values depend only on the seed and the timestamp | Re-running over the same period yields identical batches, which the API recognizes as retries. It also makes the scenario usable as a fixed evaluation case for detection. |
+| The scenario includes an unrelated deployment and a healthy control service | Correlation must not blame the red herring, and detection must not flag the control. |
+| Synthetic data is labelled at the data level (`source=simulator`) | The label travels with the data into every chart, log view and, later, every AI prompt. |
+| The simulator's API key comes from an environment variable | Command-line arguments are visible to other users on the machine. |
+
+Verified:
+- on the Docker stack: a simulator run stored 3 metric batches, 1 log batch and 1 deployment batch; a second run over the same period was answered as 5 replays with nothing republished
+- in a real browser against the emulator: the service page shows the latency rise starting at the 2.43.0 deployment marker with the error logs beneath it; the deployments page lists the cause and the red herring; a 390px layout has no horizontal overflow; no failed requests or page errors
+
+A mistake during verification, recorded so it isn't repeated: the first browser run reached a dev server already running on port 5173 that was configured for the real Firebase project, and attempted a sign-up there. Test runs now use their own ports and refuse to start unless the served app is in emulator mode.

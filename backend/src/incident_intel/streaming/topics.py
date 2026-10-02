@@ -14,14 +14,26 @@ class TopicSpec:
     retention_ms: int
 
 
-# Validated metric batches from the ingestion API, keyed by project_id so each project's
-# batches stay ordered within one partition. Retention is a replay buffer, not storage.
+def _dead_letter(spec: TopicSpec) -> TopicSpec:
+    """Where messages from ``spec`` go when they can never be processed. Kept longer, for
+    inspection."""
+    return TopicSpec(f"{spec.name}.dlq", partitions=1, retention_ms=14 * _DAY_MS)
+
+
+# Validated batches from the ingestion API, keyed by project_id so each project's batches
+# stay ordered within one partition. Retention is a replay buffer, not storage.
 METRICS = TopicSpec("telemetry.metrics.v1", partitions=6, retention_ms=3 * _DAY_MS)
+LOGS = TopicSpec("telemetry.logs.v1", partitions=6, retention_ms=3 * _DAY_MS)
+# Low volume, and consumers will care about order across services: one partition.
+DEPLOYMENTS = TopicSpec("telemetry.deployments.v1", partitions=1, retention_ms=7 * _DAY_MS)
 
-# Messages the storage consumer could never process, kept longer for inspection.
-METRICS_DLQ = TopicSpec("telemetry.metrics.v1.dlq", partitions=1, retention_ms=14 * _DAY_MS)
+METRICS_DLQ = _dead_letter(METRICS)
+LOGS_DLQ = _dead_letter(LOGS)
+DEPLOYMENTS_DLQ = _dead_letter(DEPLOYMENTS)
 
-ALL_TOPICS = (METRICS, METRICS_DLQ)
+# Each telemetry topic with its dead-letter topic.
+TELEMETRY_TOPICS = ((METRICS, METRICS_DLQ), (LOGS, LOGS_DLQ), (DEPLOYMENTS, DEPLOYMENTS_DLQ))
+ALL_TOPICS = tuple(spec for pair in TELEMETRY_TOPICS for spec in pair)
 
 
 def topic_name(settings: RuntimeSettings, spec: TopicSpec) -> str:

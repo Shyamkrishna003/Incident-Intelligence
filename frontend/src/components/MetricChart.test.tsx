@@ -44,12 +44,41 @@ describe("MetricChart", () => {
     render(<MetricChart data={range([series("eu", [1, 2])])} stale={false} />);
 
     expect(screen.queryByRole("list", { name: "Series" })).not.toBeInTheDocument();
+    // Its attributes are still stated, in the caption.
+    expect(screen.getByText("Series: region=eu.")).toBeInTheDocument();
   });
 
   it("says so when the range has no points", () => {
     render(<MetricChart data={range([series("eu", [])])} stale={false} />);
 
     expect(screen.getByRole("heading", { name: "No data in this time range" })).toBeInTheDocument();
+  });
+
+  it("names the deployments it marks, and ignores ones outside the range", () => {
+    const deployment = (version: string, deployed_at: string) => ({
+      id: version,
+      service: "payment-api",
+      version,
+      deployed_at,
+      commit_sha: null,
+      environment: null,
+      deployed_by: null,
+      description: null,
+    });
+    render(
+      <MetricChart
+        data={range([series("eu", [1, 2])])}
+        stale={false}
+        deployments={[
+          deployment("2.43.0", "2026-10-02T10:30:00Z"),
+          deployment("1.0.0", "2026-10-01T10:30:00Z"),
+        ]}
+      />,
+    );
+
+    const caption = screen.getByText(/Vertical lines mark deployments/);
+    expect(caption).toHaveTextContent("2.43.0");
+    expect(caption).not.toHaveTextContent("1.0.0");
   });
 
   it("is honest about series and points it is not showing", () => {

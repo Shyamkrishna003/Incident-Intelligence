@@ -13,7 +13,7 @@ Delivery contract implemented by ``run_consumer``:
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
@@ -81,12 +81,15 @@ async def run_consumer(
     source: MessageSource,
     handler: MessageHandler,
     publisher: MessagePublisher,
-    dlq_topic: str,
+    dlq_topic: str | Mapping[str, str],
     stop: asyncio.Event,
     retry: RetryPolicy | None = None,
     poll_timeout_seconds: float = 1.0,
 ) -> None:
-    """Process messages until ``stop`` is set. Returns without committing an unfinished one."""
+    """Process messages until ``stop`` is set. Returns without committing an unfinished one.
+
+    ``dlq_topic`` is one dead-letter topic, or a mapping from each source topic to its own.
+    """
     retry = retry or RetryPolicy()
     while not stop.is_set():
         message = await source.poll(poll_timeout_seconds)
@@ -106,7 +109,7 @@ async def _process_until_settled(
     *,
     handler: MessageHandler,
     publisher: MessagePublisher,
-    dlq_topic: str,
+    dlq_topic: str | Mapping[str, str],
     stop: asyncio.Event,
     retry: RetryPolicy,
 ) -> bool:
@@ -118,7 +121,10 @@ async def _process_until_settled(
             return True
         except PermanentMessageError as exc:
             try:
-                await _dead_letter(message, exc, publisher=publisher, dlq_topic=dlq_topic)
+                # A missing mapping entry is a wiring bug: the KeyError is retried and
+                # logged loudly instead of silently dropping the message.
+                target = dlq_topic if isinstance(dlq_topic, str) else dlq_topic[message.topic]
+                await _dead_letter(message, exc, publisher=publisher, dlq_topic=target)
                 return True
             except PublishError:
                 logger.exception("dead_letter_publish_failed", position=message.position)

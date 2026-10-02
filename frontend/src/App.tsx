@@ -9,6 +9,7 @@ import { useMe } from "./hooks/queries";
 import { ApiError } from "./lib/api";
 import type { Me } from "./lib/types";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
+import { DeploymentsPage } from "./pages/DeploymentsPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
 import { ServicesPage } from "./pages/ServicesPage";
 import { SignInPage } from "./pages/SignInPage";
@@ -128,6 +129,7 @@ function ProjectRoutes({ me, account }: { me: Me; account: Account }) {
             </Suspense>
           }
         />
+        <Route path="deployments" element={<DeploymentsPage current={current} />} />
         <Route path="api-keys" element={<ApiKeysPage current={current} />} />
         <Route path="*" element={<Navigate to="services" replace />} />
       </Routes>

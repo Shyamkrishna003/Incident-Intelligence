@@ -2,6 +2,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -16,7 +17,7 @@ import {
   formatValue,
   seriesLabel,
 } from "../lib/format";
-import type { MetricRange } from "../lib/types";
+import type { Deployment, MetricRange } from "../lib/types";
 import { EmptyState } from "./ui";
 
 const TABLE_ROW_LIMIT = 200;
@@ -39,7 +40,16 @@ interface TooltipProps {
   payload?: readonly { dataKey?: unknown; value?: unknown }[];
 }
 
-export function MetricChart({ data, stale }: { data: MetricRange; stale: boolean }) {
+export function MetricChart({
+  data,
+  stale,
+  deployments = [],
+}: {
+  data: MetricRange;
+  stale: boolean;
+  /** Deployments of this service; those inside the charted range are marked. */
+  deployments?: Deployment[];
+}) {
   const shown = data.series.slice(0, MAX_SERIES);
   const hidden = data.series.length - shown.length;
   const labels = shown.map((series) => seriesLabel(series.attributes));
@@ -49,6 +59,10 @@ export function MetricChart({ data, stale }: { data: MetricRange; stale: boolean
   const endMs = Date.parse(data.end);
   // Evenly spaced across the whole requested range, not only where data exists.
   const ticks = [0, 1, 2, 3, 4].map((step) => startMs + ((endMs - startMs) * step) / 4);
+  const marked = deployments
+    .map((deployment) => ({ ...deployment, at: Date.parse(deployment.deployed_at) }))
+    .filter((deployment) => deployment.at >= startMs && deployment.at <= endMs)
+    .sort((a, b) => a.at - b.at);
 
   if (rows.length === 0) {
     return (
@@ -98,7 +112,7 @@ export function MetricChart({ data, stale }: { data: MetricRange; stale: boolean
         aria-label={`Line chart of ${data.metric} for ${data.service}. The same values are in the table below.`}
       >
         <ResponsiveContainer width="100%" height={280}>
-          <LineChart data={rows} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
+          <LineChart data={rows} margin={{ top: 20, right: 16, bottom: 0, left: 0 }}>
             <CartesianGrid vertical={false} stroke="var(--grid)" />
             <XAxis
               dataKey="t"
@@ -124,6 +138,21 @@ export function MetricChart({ data, stale }: { data: MetricRange; stale: boolean
               cursor={{ stroke: "var(--axis)", strokeWidth: 1 }}
               isAnimationActive={false}
             />
+            {/* Deployment markers: neutral ink, so they never read as a data series. */}
+            {marked.map((deployment) => (
+              <ReferenceLine
+                key={deployment.id}
+                x={deployment.at}
+                stroke="var(--ink-2)"
+                strokeWidth={1}
+                label={{
+                  value: deployment.version,
+                  position: "top",
+                  fill: "var(--ink-2)",
+                  fontSize: 11,
+                }}
+              />
+            ))}
             {shown.map((series, index) => (
               <Line
                 key={labels[index]}
@@ -146,6 +175,17 @@ export function MetricChart({ data, stale }: { data: MetricRange; stale: boolean
 
       <figcaption className="mt-2 flex flex-col gap-1 text-sm text-ink-2">
         {unit && <span>Values in {unit}.</span>}
+        {/* With one series there is no legend, so its attributes are named here. */}
+        {shown.length === 1 && labels[0] !== "all" && <span>Series: {labels[0]}.</span>}
+        {marked.length > 0 && (
+          <span>
+            Vertical lines mark deployments:{" "}
+            {marked
+              .map((deployment) => `${deployment.version} at ${formatTime(deployment.at)}`)
+              .join(", ")}
+            .
+          </span>
+        )}
         {hidden > 0 && (
           <span>
             Showing the first {MAX_SERIES} of {data.series.length} series.

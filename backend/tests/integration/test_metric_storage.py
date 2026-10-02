@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from incident_intel.streaming.consumer import ConsumedMessage, PermanentMessageError
-from incident_intel.telemetry.consumer import MetricBatchHandler
+from incident_intel.telemetry.consumer import metric_handler
 from incident_intel.telemetry.messages import MetricBatchMessage, MetricPointMessage
 from incident_intel.telemetry.models import IngestBatch, MetricPoint, MetricSeries, Service
 from incident_intel.telemetry.storage import (
@@ -190,7 +190,7 @@ async def test_handler_stores_a_valid_message(
     make_tenant: TenantFactory,
 ) -> None:
     tenant = await make_tenant()
-    handler = MetricBatchHandler(session_factory)
+    handler = metric_handler(session_factory)
 
     await handler(_message(_batch(tenant, [metric_point(T0, 1.0)])))
 
@@ -206,7 +206,7 @@ async def test_handler_dead_letters_malformed_messages(
     session_factory: async_sessionmaker[AsyncSession], raw: bytes
 ) -> None:
     with pytest.raises(PermanentMessageError) as excinfo:
-        await MetricBatchHandler(session_factory)(_message(raw))
+        await metric_handler(session_factory)(_message(raw))
 
     assert excinfo.value.reason == "invalid_message"
 
@@ -215,7 +215,7 @@ async def test_handler_dead_letters_idempotency_conflicts(
     session_factory: async_sessionmaker[AsyncSession], make_tenant: TenantFactory
 ) -> None:
     tenant = await make_tenant()
-    handler = MetricBatchHandler(session_factory)
+    handler = metric_handler(session_factory)
     batch_id = uuid.uuid4()
     await handler(_message(_batch(tenant, [metric_point(T0, 1.0)], batch_id=batch_id)))
 
@@ -238,6 +238,6 @@ async def test_handler_dead_letters_rows_the_database_rejects(
     )
 
     with pytest.raises(PermanentMessageError) as excinfo:
-        await MetricBatchHandler(session_factory)(_message(orphan))
+        await metric_handler(session_factory)(_message(orphan))
 
     assert excinfo.value.reason == "rejected_by_database"

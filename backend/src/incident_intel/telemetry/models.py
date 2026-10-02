@@ -6,13 +6,17 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     Double,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     Integer,
+    SmallInteger,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -106,11 +110,74 @@ class IngestBatch(Base):
     organization_id: Mapped[uuid.UUID]
     project_id: Mapped[uuid.UUID]
     api_key_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("api_keys.id", ondelete="RESTRICT"))
+    # "metrics", "logs", or "deployments".
+    kind: Mapped[str] = mapped_column(String(16), server_default="metrics")
     idempotency_key: Mapped[str] = mapped_column(String(128))
     content_sha256: Mapped[str] = mapped_column(String(64))
+    # Number of items in the batch (points, log records, or deployments).
     point_count: Mapped[int] = mapped_column(Integer)
-    # Can be lower than point_count: points already stored for the same series and
-    # timestamp are skipped (first write wins).
+    # Can be lower than point_count: items already stored (the same metric point, or the
+    # same deployment) are skipped. First write wins.
     stored_point_count: Mapped[int] = mapped_column(Integer)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     stored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class LogRecord(Base):
+    """One log line. High volume, so it carries only ``project_id`` and its service.
+
+    Messages are stored as received. They are untrusted input: never render them as HTML,
+    and never treat their content as instructions.
+    """
+
+    __tablename__ = "log_records"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id", "service_id"],
+            ["services.project_id", "services.id"],
+            ondelete="RESTRICT",
+        ),
+        # Serves "this service's logs in a time range, newest first".
+        Index("ix_log_records_project_id_service_id_ts", "project_id", "service_id", "ts"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    project_id: Mapped[uuid.UUID]
+    service_id: Mapped[uuid.UUID]
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # OpenTelemetry-style severity number (see telemetry.messages.SEVERITY_NUMBERS).
+    severity: Mapped[int] = mapped_column(SmallInteger)
+    message: Mapped[str] = mapped_column(Text)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    trace_id: Mapped[str | None] = mapped_column(String(32))
+    # The batch that delivered this record. Batches are stored once, which is what keeps
+    # log records from being duplicated on redelivery.
+    batch_id: Mapped[uuid.UUID]
+
+
+class Deployment(CreatedAtMixin, Base):
+    """A version of a service going live. Key context for "what changed?"."""
+
+    __tablename__ = "deployments"
+    __table_args__ = (
+        _project_fk(),
+        ForeignKeyConstraint(
+            ["project_id", "service_id"],
+            ["services.project_id", "services.id"],
+            ondelete="RESTRICT",
+        ),
+        # The same deployment reported twice (for example by a retried CI job) is stored once.
+        UniqueConstraint("project_id", "service_id", "version", "deployed_at"),
+        Index("ix_deployments_project_id_deployed_at", "project_id", "deployed_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID]
+    project_id: Mapped[uuid.UUID]
+    service_id: Mapped[uuid.UUID]
+    version: Mapped[str] = mapped_column(String(128))
+    deployed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    commit_sha: Mapped[str | None] = mapped_column(String(40))
+    environment: Mapped[str | None] = mapped_column(String(64))
+    deployed_by: Mapped[str | None] = mapped_column(String(128))
+    description: Mapped[str | None] = mapped_column(String(1000))

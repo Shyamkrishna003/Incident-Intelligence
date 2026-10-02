@@ -2,7 +2,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { useAuth } from "../auth/AuthContext";
 import { api } from "../lib/api";
-import type { ApiKeyScope } from "../lib/types";
+import type { ApiKeyScope, Severity } from "../lib/types";
 
 /** Keys are namespaced by user id so one person never sees another's cached data. */
 function useUid(): string {
@@ -55,6 +55,45 @@ export function useMetricRange(
     enabled: metric !== null,
     refetchInterval: 30_000,
     // While a new range loads, keep showing the previous chart instead of a blank frame.
+    placeholderData: keepPreviousData,
+  });
+}
+
+function lastMinutes(minutes: number): { start: Date; end: Date } {
+  const end = new Date();
+  return { start: new Date(end.getTime() - minutes * 60_000), end };
+}
+
+export function useLogs(
+  projectId: string,
+  service: string,
+  rangeMinutes: number,
+  severity: Severity | null,
+  search: string,
+) {
+  const uid = useUid();
+  return useQuery({
+    queryKey: [uid, "logs", projectId, service, rangeMinutes, severity, search],
+    queryFn: () =>
+      api.listLogs(projectId, service, { ...lastMinutes(rangeMinutes), severity, search }),
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
+  });
+}
+
+/** Deployments in the last `rangeMinutes`, for the whole project or one service. */
+export function useDeployments(projectId: string, rangeMinutes: number, service?: string) {
+  const uid = useUid();
+  return useQuery({
+    queryKey: [uid, "deployments", projectId, rangeMinutes, service ?? null],
+    queryFn: () =>
+      api.listDeployments(projectId, {
+        ...lastMinutes(rangeMinutes),
+        ...(service ? { service } : {}),
+      }),
+    select: (data) => data.deployments,
+    staleTime: 0,
+    refetchInterval: 30_000,
     placeholderData: keepPreviousData,
   });
 }
