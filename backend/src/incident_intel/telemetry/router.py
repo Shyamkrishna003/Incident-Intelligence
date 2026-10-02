@@ -18,8 +18,10 @@ from incident_intel.api.deps import require_project_role, require_scope
 from incident_intel.core.errors import InvalidInputError
 from incident_intel.db.session import get_session
 from incident_intel.telemetry.messages import NAME_PATTERN
-from incident_intel.telemetry.queries import list_services, read_metric_range
+from incident_intel.telemetry.queries import list_metrics, list_services, read_metric_range
 from incident_intel.telemetry.schemas import (
+    MetricListResponse,
+    MetricOut,
     MetricRangeResponse,
     PointOut,
     SeriesOut,
@@ -53,6 +55,16 @@ async def _services(session: AsyncSession, scope: TenantScope, limit: int) -> Se
     services = await list_services(session, scope, limit=limit)
     return ServiceListResponse(
         services=[ServiceOut(id=s.id, name=s.name, created_at=s.created_at) for s in services]
+    )
+
+
+async def _metrics(
+    session: AsyncSession, scope: TenantScope, service: str, limit: int
+) -> MetricListResponse:
+    metrics = await list_metrics(session, scope, service_name=service, limit=limit)
+    return MetricListResponse(
+        service=service,
+        metrics=[MetricOut(name=m.name, unit=m.unit, series_count=m.series_count) for m in metrics],
     )
 
 
@@ -110,6 +122,14 @@ async def get_services(
     return await _services(session, ctx, limit)
 
 
+@router.get("/{service}/metrics", response_model=MetricListResponse)
+async def get_metrics(
+    ctx: ReadContext, session: Session, service: ServiceName, limit: ServiceLimit = 500
+) -> MetricListResponse:
+    """The metrics a service has reported, by name."""
+    return await _metrics(session, ctx, service, limit)
+
+
 @router.get("/{service}/metrics/{metric}", response_model=MetricRangeResponse)
 async def get_metric_range(
     ctx: ReadContext,
@@ -138,6 +158,14 @@ async def get_project_services(
 ) -> ServiceListResponse:
     """Services that have sent telemetry to a project the user can view."""
     return await _services(session, access.scope, limit)
+
+
+@project_router.get("/{service}/metrics", response_model=MetricListResponse)
+async def get_project_metrics(
+    access: ViewerAccess, session: Session, service: ServiceName, limit: ServiceLimit = 500
+) -> MetricListResponse:
+    """The metrics a service has reported, in a project the user can view."""
+    return await _metrics(session, access.scope, service, limit)
 
 
 @project_router.get("/{service}/metrics/{metric}", response_model=MetricRangeResponse)

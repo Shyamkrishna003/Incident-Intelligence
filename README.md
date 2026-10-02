@@ -10,7 +10,7 @@ AI-assisted incident detection, investigation, root-cause analysis, and reliabil
 
 ## Status
 
-Implemented through **slice 3a: metric ingestion (the *Observe* stage) plus sign-in for people**:
+Implemented through **slice 3b: metric ingestion (the *Observe* stage), sign-in for people, and a web app**:
 
 - **Foundation (slice 1):**
   - FastAPI backend with typed configuration, structured JSON logs (with secret redaction), and request IDs.
@@ -33,7 +33,13 @@ Implemented through **slice 3a: metric ingestion (the *Observe* stage) plus sign
   - Firebase only proves identity. Organization membership and roles live in PostgreSQL and are checked on every request.
   - Signed-in users can create an organization and projects, manage API keys, and read their projects' services and metrics.
 
-Next come the web frontend (slice 3b), detection and AI investigation. See the architecture doc, §11.
+- **Web app (slice 3b):**
+  - Sign in or sign up with email/password, Google or GitHub, including email verification and linking a second sign-in method to an existing account.
+  - First-time setup creates an organization and a project.
+  - Browse services and chart their metrics over 15 minutes to 24 hours, with a table view of the same data.
+  - Admins create and revoke API keys. A new key is shown once.
+
+Next come logs and deployments, detection and AI investigation. See the architecture doc, §11.
 
 ## How ingestion works
 
@@ -155,7 +161,30 @@ make run          # API with auto-reload on http://localhost:8000
 make consume      # storage consumer (in another terminal)
 ```
 
+Run the web app (in another terminal, with the API running on port 8000):
+
+```bash
+make web          # http://localhost:5173
+```
+
+It needs the four `VITE_FIREBASE_*` values in `.env` (see [.env.example](.env.example)). The dev server forwards `/v1` requests to the API, so the browser talks to a single origin and the API needs no cross-origin configuration.
+
 The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIRONMENT=production`.
+
+## Web app
+
+| Screen | What it does |
+|---|---|
+| Sign in | Email/password, Google or GitHub. If the email already belongs to an account with a different method, the app asks the user to sign in the original way and then links the new method. |
+| Setup | Shown until the user can reach a project. Asks for email verification first, then creates an organization and its first project. If setup was interrupted after the organization was created, it asks only for the project. |
+| Services | The services that have sent telemetry to the selected project. Refreshes when opened and every 30 seconds. |
+| Service | Pick a metric and a time range (15 minutes to 24 hours). One line per series (attribute set), a legend, a hover readout of every series, and the same values as a table. Refreshes every 30 seconds. |
+| API keys | Admins and owners only. Create a key (shown once, with a copy button) and revoke keys after confirmation. |
+
+- Every screen has loading, empty and error states. Errors show the server's message and a retry button.
+- What a role may do is enforced by the API. The app only hides controls a user couldn't use.
+- Light and dark themes follow the system setting. The chart colours are a colour-blind-safe set checked in both themes.
+- A project the user can't access shows the same "not found" page as one that doesn't exist.
 
 ## API
 
@@ -174,6 +203,7 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | DELETE | `/v1/projects/{project_id}/api-keys/{prefix}` | admin or owner | Revoke a key of this project. Takes effect immediately. |
 | GET | `/v1/projects/{project_id}/services` | any member | Services in the project |
 | GET | `/v1/projects/{project_id}/services/{service}/metrics/{metric}` | any member | Metric points, same parameters as the API-key endpoint |
+| GET | `/v1/services/{service}/metrics` | API key with `telemetry:read` | The metrics a service has reported, with the number of series each has. Also at `/v1/projects/{project_id}/services/{service}/metrics` for signed-in users. |
 | GET | `/v1/services/{service}/metrics/{metric}` | API key with `telemetry:read` | Points in `[start, end)` (default: the last hour; at most 24 h), grouped by attribute set. `limit` defaults to 1000 and can be at most 10 000; `truncated` is true if more points exist. |
 
 ### Ingestion rules
@@ -217,7 +247,8 @@ ii dlq inspect [--limit 20] [--show-values]   # dead-lettered messages; bodies h
 
 | Command | What it does |
 |---|---|
-| `make check` | lint + type check + all tests |
+| `make check` | everything: backend lint, type check and tests, plus the frontend checks |
+| `make web` / `make web-check` | run the web app / frontend lint, type check, tests and production build |
 | `make lint` / `make fmt` | ruff check / ruff format |
 | `make typecheck` | mypy `--strict` |
 | `make test` | pytest: unit, integration (PostgreSQL), Redis, and end-to-end (Kafka). Needs `make infra`. Emulator tests also need `make emulator`. |
@@ -238,6 +269,7 @@ ii dlq inspect [--limit 20] [--show-values]   # dead-lettered messages; bodies h
 - **Redis tests** (marker `redis`) run when `TEST_REDIS_URL` is set. Otherwise they're reported as skipped.
   - Every other test uses an in-memory stand-in. A contract suite runs the same checks against both the stand-in and real Redis, so the two can't drift apart.
   - Each test uses a random key prefix and deletes only its own keys.
+- **Frontend tests** (Vitest and React Testing Library) cover the API client, sign-in, setup, the services list, API keys, the chart's legend and table, and routing by sign-in state and role. They use a fake auth context and never contact Firebase.
 - **Consumer delivery rules** (commit only after success, retry transient errors, dead-letter permanent ones) are unit-tested with an in-memory message source.
 
 ### Layout
@@ -258,6 +290,13 @@ backend/
     migrations/  Alembic environment and revisions (shipped inside the package)
     cli.py       `ii` admin CLI
   tests/{unit,integration,cache,kafka,firebase}/
+frontend/
+  src/
+    lib/         API client and types, Firebase setup, formatting, chart data shaping
+    auth/        sign-in state and actions (Firebase), error messages
+    hooks/       data fetching and mutations (TanStack Query)
+    components/  shared UI, app shell, metric chart
+    pages/       sign-in, setup, services, service (chart), API keys
 examples/              example client script
 infra/postgres/init/   first-run database init (creates the test database)
 infra/firebase-emulator/  optional local Firebase Auth emulator image
@@ -272,13 +311,17 @@ See [.env.example](.env.example).
 - `KAFKA_BOOTSTRAP_SERVERS` is `localhost:9094` from the host. Containers use `kafka:9092`, set in compose.
 - `REDIS_URL` is `redis://localhost:6379/0` from the host. The API container uses `redis://redis:6379/0`, set in compose.
 - `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` set the per-key limit. `RATE_LIMIT_FAIL_OPEN`, `IDEMPOTENCY_TTL_SECONDS` and `API_KEY_CACHE_TTL_SECONDS` are optional.
+- `VITE_FIREBASE_*` configure the web app. They are public identifiers that ship in the browser bundle. Vite exposes only `VITE_`-prefixed variables to the browser, so the secrets in the same `.env` file stay out of it.
 - `FIREBASE_PROJECT_ID` enables sign-in for people. `FIREBASE_AUTH_EMULATOR_HOST` switches to the local emulator (never in production).
 - Real environment variables override `.env`, and `.env` is git-ignored. Never commit it.
 
 ## Known limitations
 
 - **No invitations yet.** An organization has one user, its owner. Other members can only be added directly in the database until a later slice.
-- **No web frontend yet** (slice 3b). User endpoints can be called with any valid Firebase ID token.
+- **The web app runs only through the dev server** (`make web`). There's no production container or hosting setup yet (deployment slice).
+- **No password reset screen and no profile or organization settings** in the web app yet.
+- **Sign-in with real Google and GitHub accounts hasn't been tested end to end.** The flows were exercised against the Firebase emulator with email/password.
+- **Charts show at most 8 series** and at most 5,000 points per request. Both limits are stated on the chart when they apply.
 - **Token revocation isn't checked.** A Firebase ID token stays valid until it expires (up to an hour) even if the account is disabled in Firebase. Access still ends immediately when the membership is removed in this system.
 - **Users, organizations and projects can't be deleted or renamed** through the API yet.
 - **Rate limiting is per API key or user, after authentication.** Requests with invalid credentials aren't limited (no per-IP limit yet), and each one with a well-formed but unknown key costs a database lookup.

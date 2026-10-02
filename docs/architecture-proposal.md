@@ -578,3 +578,36 @@ Verified:
 - against the real Firebase project ID: a forged token with the right audience and issuer is rejected after the SDK fetches Google's public keys (about 0.25 s once, then about 3 ms from cache); no user row is created and the token doesn't appear in logs
 
 Pinned: `firebase-admin` 7.7.0, `firebase-tools` 15.32.1 (emulator image).
+
+---
+
+## 17. Slice 3b (web app): implementation record
+
+A React single-page app in `frontend/`: React 19, TypeScript (strict), Vite, Tailwind CSS, TanStack Query, React Router, Recharts and the Firebase JS SDK.
+
+- **Auth:** `auth/AuthContext.tsx` wraps Firebase Authentication. The API client asks it for the current ID token on every request and retries once with a fresh token after a 401.
+- **Data:** `hooks/queries.ts` holds every query and mutation. Cache keys include the user id, and the cache is cleared on sign-out.
+- **Screens:** sign-in, setup, services, service (chart), API keys. Each handles loading, empty and error states.
+- **Backend addition:** `GET .../services/{service}/metrics` lists a service's metrics. The chart page needs it to offer a metric picker.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| One `.env` for the repo; Vite reads it with `envDir: ".."` | Vite exposes only `VITE_`-prefixed variables to the browser, so backend secrets in the same file stay out of the bundle. |
+| The dev server proxies `/v1` to the API | The browser sees one origin, so the API needs no CORS configuration. |
+| Account linking waits for the user to sign in the original way | Firebase no longer reveals which sign-in method an email uses (email enumeration protection), so the app can't pick the method for them. |
+| Email verification is a step in setup, for every sign-in method | The API requires a verified email to create an organization, and Firebase doesn't treat GitHub emails as verified. |
+| Role checks in the app only hide controls | The API enforces roles. A user who forces a hidden page gets a 403 or 404 from the server. |
+| The services and metrics lists refetch on every visit | New services appear when they first send data, outside the app. Found in the browser run: a cached empty list hid a service that had just started reporting. |
+| The chart page is loaded on demand | The chart library is about a third of the JavaScript. |
+| Chart: validated 8-colour categorical palette, 2px lines, legend for two or more series, hover readout of every series, table view | The colours pass a colour-blindness check in light and dark themes. Three light-theme colours are low-contrast against the background, so the table view is always available. |
+| At most 8 series per chart | The palette has 8 validated colours. The chart says when series are left out. |
+
+Verified in a real browser (Chrome, driven by a script, against the Firebase emulator):
+- sign up, verify email, create an organization and project, create an API key
+- ingest 93 points with that key, then see the service and its chart with two series
+- the hover readout, dark theme, table view, and a 390px-wide phone layout with no horizontal overflow
+- no failed API requests and no page errors
+
+Not verified: sign-in with real Google and GitHub accounts, and the account-linking flow against real providers.

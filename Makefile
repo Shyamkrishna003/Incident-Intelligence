@@ -5,7 +5,7 @@
 COMPOSE := docker compose
 VENV_BIN := ../.venv/bin
 
-.PHONY: help env venv lock db infra emulator kafka-init up down logs migrate run consume dlq bootstrap test test-unit lint fmt typecheck check
+.PHONY: help env venv lock db infra emulator kafka-init web-install web web-check up down logs migrate run consume dlq bootstrap test test-unit lint fmt typecheck check
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -63,6 +63,17 @@ consume: venv ## Run the storage consumer on the host (Kafka -> PostgreSQL)
 dlq: venv ## Show dead-lettered messages (metadata only)
 	cd backend && $(VENV_BIN)/ii dlq inspect
 
+web-install: frontend/node_modules/.package-lock.json ## Install the frontend's packages
+
+frontend/node_modules/.package-lock.json: frontend/package-lock.json
+	cd frontend && npm ci --no-fund --no-audit
+
+web: web-install ## Run the web app on http://localhost:5173 (needs the API on :8000)
+	cd frontend && npm run dev
+
+web-check: web-install ## Frontend lint, type check, tests, and production build
+	cd frontend && npm run lint && npm run typecheck && npm test && npm run build
+
 bootstrap: venv ## Create an org, project, and API key: make bootstrap ORG=acme PROJECT=payments
 	@test -n "$(ORG)" -a -n "$(PROJECT)" || { echo "usage: make bootstrap ORG=<slug> PROJECT=<slug>"; exit 2; }
 	cd backend && $(VENV_BIN)/ii bootstrap --org "$(ORG)" --project "$(PROJECT)"
@@ -82,4 +93,4 @@ fmt: venv ## Auto-format and apply safe lint fixes
 typecheck: venv ## Static type check (mypy --strict)
 	cd backend && $(VENV_BIN)/mypy
 
-check: lint typecheck test ## Lint, type check, and test
+check: lint typecheck test web-check ## Everything: backend lint, types, tests + frontend checks

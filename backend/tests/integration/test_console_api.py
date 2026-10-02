@@ -328,6 +328,7 @@ async def test_another_organizations_resources_are_not_found(
         await client.get(
             f"{project}/services/payment-api/metrics/latency", headers=outsider.headers
         ),
+        await client.get(f"{project}/services/payment-api/metrics", headers=outsider.headers),
         await client.get(f"{project}/api-keys", headers=outsider.headers),
         await client.post(f"{project}/api-keys", json={"name": "x"}, headers=outsider.headers),
         await client.delete(f"{project}/api-keys/abcdefghijkl", headers=outsider.headers),
@@ -338,7 +339,7 @@ async def test_another_organizations_resources_are_not_found(
         ),
     ]
 
-    assert [r.status_code for r in responses] == [404] * 6
+    assert [r.status_code for r in responses] == [404] * 7
     # Indistinguishable from a project that does not exist at all.
     missing = await client.get(f"/v1/projects/{uuid.uuid4()}/services", headers=outsider.headers)
     assert missing.status_code == 404
@@ -504,5 +505,9 @@ async def test_user_reads_metrics_of_their_project_only(
     )
 
     assert [s["name"] for s in services.json()["services"]] == ["payment-api"]
+    listed = await client.get(
+        f"/v1/projects/{mine.project_id}/services/payment-api/metrics", headers=mine.owner.headers
+    )
+    assert [m["name"] for m in listed.json()["metrics"]] == ["latency"]
     values = [p["value"] for s in metrics.json()["series"] for p in s["points"]]
     assert values == [120.0]

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incident_intel.core.errors import NotFoundError
@@ -35,6 +35,28 @@ async def get_service(session: AsyncSession, ctx: TenantScope, name: str) -> Ser
     if service is None:
         raise NotFoundError(f"Service '{name}' not found.")
     return service
+
+
+@dataclass(frozen=True)
+class MetricSummary:
+    name: str
+    unit: str | None
+    series_count: int
+
+
+async def list_metrics(
+    session: AsyncSession, ctx: TenantScope, *, service_name: str, limit: int
+) -> list[MetricSummary]:
+    """The metrics a service has reported, by name, with how many series each has."""
+    service = await get_service(session, ctx, service_name)
+    rows = await session.execute(
+        select(MetricSeries.name, func.min(MetricSeries.unit), func.count())
+        .where(MetricSeries.project_id == ctx.project_id, MetricSeries.service_id == service.id)
+        .group_by(MetricSeries.name)
+        .order_by(MetricSeries.name)
+        .limit(limit)
+    )
+    return [MetricSummary(name=name, unit=unit, series_count=count) for name, unit, count in rows]
 
 
 @dataclass(frozen=True)

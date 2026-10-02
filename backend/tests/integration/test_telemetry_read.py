@@ -196,3 +196,44 @@ async def test_reads_require_the_read_scope(
 
     assert services.status_code == 403
     assert metric.status_code == 403
+
+
+async def test_lists_a_services_metrics_with_series_counts(
+    client: AsyncClient, db_session: AsyncSession, make_tenant: TenantFactory
+) -> None:
+    tenant = await make_tenant()
+    other = await make_tenant()
+    await _store(
+        db_session,
+        tenant,
+        [
+            metric_point(T0, 1.0, metric="latency", attributes={"region": "eu"}),
+            metric_point(T0, 2.0, metric="latency", attributes={"region": "us"}),
+            metric_point(T0, 3.0, metric="errors", unit=None),
+            metric_point(T0, 4.0, metric="other-service-metric", service="checkout"),
+        ],
+    )
+    await _store(db_session, other, [metric_point(T0, 9.0, metric="not-mine")])
+
+    response = await client.get("/v1/services/payment-api/metrics", headers=tenant.auth_headers)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "service": "payment-api",
+        "metrics": [
+            {"name": "errors", "unit": None, "series_count": 1},
+            {"name": "latency", "unit": "ms", "series_count": 2},
+        ],
+    }
+
+
+async def test_metrics_of_an_unknown_or_foreign_service_are_not_found(
+    client: AsyncClient, db_session: AsyncSession, make_tenant: TenantFactory
+) -> None:
+    tenant = await make_tenant()
+    other = await make_tenant()
+    await _store(db_session, other, [metric_point(T0, 1.0, service="b-only")])
+
+    for service in ("nope", "b-only"):
+        response = await client.get(f"/v1/services/{service}/metrics", headers=tenant.auth_headers)
+        assert response.status_code == 404

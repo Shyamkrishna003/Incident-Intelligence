@@ -14,6 +14,18 @@ class ServiceListResponse(BaseModel):
     services: list[ServiceOut]
 
 
+class MetricOut(BaseModel):
+    name: str
+    unit: str | None
+    # One series per distinct attribute set (for example per region).
+    series_count: int
+
+
+class MetricListResponse(BaseModel):
+    service: str
+    metrics: list[MetricOut]
+
+
 class PointOut(BaseModel):
     timestamp: datetime
     value: float
