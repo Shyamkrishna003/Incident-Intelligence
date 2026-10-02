@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from incident_intel.main import create_app
-from tests.support import FakePublisher, make_settings
+from tests.support import FakeCache, FakePublisher, make_settings
 
 UNREACHABLE_DB = "postgresql+asyncpg://user:pw@127.0.0.1:1/unreachable_test"
 LIMIT = 2048
@@ -16,7 +16,9 @@ LIMIT = 2048
 @pytest.fixture
 async def small_limit_client() -> AsyncIterator[AsyncClient]:
     app: FastAPI = create_app(
-        make_settings(UNREACHABLE_DB, max_request_body_bytes=LIMIT), publisher=FakePublisher()
+        make_settings(UNREACHABLE_DB, max_request_body_bytes=LIMIT),
+        publisher=FakePublisher(),
+        cache=FakeCache().services(),
     )
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as http:
         yield http

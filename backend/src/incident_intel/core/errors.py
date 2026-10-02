@@ -75,6 +75,25 @@ class ConflictError(AppError):
     default_message = "The resource conflicts with existing state."
 
 
+class IdempotencyKeyReusedError(ConflictError):
+    code = "idempotency_conflict"
+    default_message = "This Idempotency-Key was already used with different data."
+
+
+class RateLimitedError(AppError):
+    status_code = 429
+    code = "rate_limited"
+    default_message = "Too many requests. Retry later."
+
+    def __init__(self, *, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__()
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"Retry-After": str(self.retry_after_seconds)}
+
+
 class ServiceUnavailableError(AppError):
     """A dependency is temporarily unavailable; the client should retry later."""
 

@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from incident_intel.main import create_app
-from tests.support import FakePublisher, make_settings
+from tests.support import FakeCache, FakePublisher, make_settings
 
 # Nothing listens on port 1, so connections are refused immediately.
 UNREACHABLE_DB = "postgresql+asyncpg://user:pw@127.0.0.1:1/unreachable_test"
@@ -16,7 +16,9 @@ UNREACHABLE_DB = "postgresql+asyncpg://user:pw@127.0.0.1:1/unreachable_test"
 @pytest.fixture
 async def offline_app() -> AsyncIterator[FastAPI]:
     app = create_app(
-        make_settings(UNREACHABLE_DB, readiness_timeout_seconds=2.0), publisher=FakePublisher()
+        make_settings(UNREACHABLE_DB, readiness_timeout_seconds=2.0),
+        publisher=FakePublisher(),
+        cache=FakeCache().services(),
     )
     yield app
     await app.state.engine.dispose()
@@ -42,7 +44,12 @@ async def test_readyz_reports_unavailable_database(offline_client: AsyncClient) 
     assert response.status_code == 503
     assert response.json() == {
         "status": "not_ready",
-        "checks": {"database": "unavailable", "migrations": "unknown", "kafka": "ok"},
+        "checks": {
+            "database": "unavailable",
+            "migrations": "unknown",
+            "kafka": "ok",
+            "redis": "ok",
+        },
     }
 
 

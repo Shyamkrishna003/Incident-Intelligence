@@ -6,7 +6,8 @@ an outer transaction on one connection that is rolled back afterwards, so tests 
 and leave no data behind. Every session in a test (the API's, the storage consumer's) joins
 that transaction, and service code that calls ``commit()`` only releases a SAVEPOINT.
 
-Kafka tests (marker ``kafka``) additionally need TEST_KAFKA_BOOTSTRAP_SERVERS.
+Kafka tests (marker ``kafka``) additionally need TEST_KAFKA_BOOTSTRAP_SERVERS, and Redis
+tests (marker ``redis``) need TEST_REDIS_URL. Everything else uses in-memory fakes.
 """
 
 import uuid
@@ -37,7 +38,7 @@ from incident_intel.main import create_app
 from incident_intel.tenancy.api_keys import DEFAULT_SCOPES, ApiKeyScope
 from incident_intel.tenancy.models import ApiKey, Organization, Project
 from incident_intel.tenancy.service import create_organization, create_project, issue_api_key
-from tests.support import TEST_PEPPER, FakePublisher, make_settings
+from tests.support import TEST_PEPPER, FakeCache, FakePublisher, make_settings
 
 
 class _TestEnvironment(BaseSettings):
@@ -45,6 +46,7 @@ class _TestEnvironment(BaseSettings):
 
     test_database_url: SecretStr | None = None
     test_kafka_bootstrap_servers: str | None = None
+    test_redis_url: SecretStr | None = None
 
 
 @pytest.fixture(scope="session")
@@ -113,10 +115,15 @@ def publisher() -> FakePublisher:
 
 
 @pytest.fixture
+def cache() -> FakeCache:
+    return FakeCache()
+
+
+@pytest.fixture
 async def app(
-    settings: Settings, db_session: AsyncSession, publisher: FakePublisher
+    settings: Settings, db_session: AsyncSession, publisher: FakePublisher, cache: FakeCache
 ) -> AsyncIterator[FastAPI]:
-    application = create_app(settings, publisher=publisher)
+    application = create_app(settings, publisher=publisher, cache=cache.services())
 
     async def _test_session() -> AsyncIterator[AsyncSession]:
         yield db_session

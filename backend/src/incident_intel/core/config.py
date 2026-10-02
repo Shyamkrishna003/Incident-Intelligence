@@ -66,6 +66,26 @@ class Settings(RuntimeSettings):
     ingest_max_point_age_seconds: int = Field(default=7 * 24 * 3600, gt=0)
     ingest_max_future_skew_seconds: int = Field(default=300, ge=0)
 
+    # Redis: a cache and limiter only, never the source of truth. SecretStr because the
+    # URL may carry a password.
+    redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
+    # Prepended to every key; lets tests or environments share one Redis.
+    redis_key_prefix: str = Field(default="ii:", pattern=r"^[A-Za-z0-9._:-]*$")
+    # Kept short: Redis is on the request path, and every use has a fallback.
+    redis_timeout_seconds: float = Field(default=0.25, gt=0)
+
+    # Each API key may make this many requests per window; beyond it the API answers 429.
+    rate_limit_requests: int = Field(default=600, ge=1)
+    rate_limit_window_seconds: int = Field(default=60, ge=1)
+    # While Redis is unreachable: True lets requests through, False rejects them (503).
+    rate_limit_fail_open: bool = True
+
+    # How long an Idempotency-Key is remembered at the API edge.
+    idempotency_ttl_seconds: int = Field(default=24 * 3600, ge=60)
+    # How long a verified API key is cached (0 disables the cache). Also the longest a
+    # revoked key could keep working if Redis is unreachable at the moment of revocation.
+    api_key_cache_ttl_seconds: int = Field(default=60, ge=0, le=3600)
+
 
 @lru_cache
 def get_settings() -> Settings:

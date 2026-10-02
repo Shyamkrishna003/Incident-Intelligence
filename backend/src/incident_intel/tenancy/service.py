@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incident_intel.audit.service import Actor, record_audit_event
+from incident_intel.cache.api_keys import ApiKeyCache, CachedApiKey
 from incident_intel.core.errors import (
     AuthenticationError,
     ConflictError,
@@ -183,7 +184,14 @@ async def issue_api_key(
     return IssuedApiKey(api_key=api_key, plaintext=generated.plaintext)
 
 
-async def revoke_api_key(session: AsyncSession, *, key_prefix: str, actor: Actor) -> ApiKey:
+async def revoke_api_key(
+    session: AsyncSession, *, key_prefix: str, actor: Actor, cache: ApiKeyCache | None = None
+) -> ApiKey:
+    """Revoke a key and drop it from the API-key cache.
+
+    If the cache cannot be reached, the key may keep authenticating until its cache entry
+    expires (at most ``api_key_cache_ttl_seconds``); that case is logged.
+    """
     api_key = await session.scalar(select(ApiKey).where(ApiKey.key_prefix == key_prefix))
     if api_key is None:
         raise NotFoundError(f"API key with prefix '{key_prefix}' not found.")
@@ -200,6 +208,9 @@ async def revoke_api_key(session: AsyncSession, *, key_prefix: str, actor: Actor
             details={"prefix": api_key.key_prefix},
         )
         await session.commit()
+    # After the commit, and even when already revoked: a repeat revoke retries the cleanup.
+    if cache is not None and not await cache.invalidate(key_prefix):
+        logger.warning("api_key_cache_invalidation_failed", key_prefix=key_prefix)
     return api_key
 
 
@@ -210,20 +221,46 @@ async def list_api_keys(session: AsyncSession, *, project: Project) -> list[ApiK
     return list(result)
 
 
+def _context_from_cache(cached: CachedApiKey) -> TenantContext:
+    return TenantContext(
+        organization_id=cached.organization_id,
+        project_id=cached.project_id,
+        principal=ApiKeyPrincipal(
+            api_key_id=cached.api_key_id,
+            name=cached.name,
+            key_prefix=cached.key_prefix,
+            scopes=frozenset(ApiKeyScope(scope) for scope in cached.scopes),
+        ),
+    )
+
+
 async def authenticate_api_key(
     session: AsyncSession,
     presented: str,
     *,
     pepper: str,
+    cache: ApiKeyCache | None = None,
     last_used_resolution: timedelta = timedelta(seconds=60),
     now: datetime | None = None,
 ) -> TenantContext:
-    """Resolve a presented API key to its tenant scope, or raise AuthenticationError."""
+    """Resolve a presented API key to its tenant scope, or raise AuthenticationError.
+
+    With a cache, a recently verified key is checked against its cached HMAC without
+    touching the database. Only active keys are cached, and revocation deletes the entry.
+    """
     now = now or _utcnow()
     prefix = parse_key_prefix(presented)
     if prefix is None:
         hash_api_key(presented, pepper)  # keep timing similar to the lookup path
         raise AuthenticationError("malformed")
+
+    cached = await cache.get(prefix) if cache is not None else None
+    if cached is not None:
+        if not verify_api_key(presented, cached.key_hash, pepper):
+            raise AuthenticationError("unknown_key")
+        if cached.expires_at is not None and cached.expires_at <= now:
+            raise AuthenticationError("expired")
+        return _context_from_cache(cached)
 
     api_key = await session.scalar(select(ApiKey).where(ApiKey.key_prefix == prefix))
     matches = verify_api_key(presented, api_key.key_hash if api_key else _DUMMY_HASH, pepper)
@@ -240,16 +277,19 @@ async def authenticate_api_key(
         )
         await session.commit()
 
-    return TenantContext(
+    entry = CachedApiKey(
+        api_key_id=api_key.id,
         organization_id=api_key.organization_id,
         project_id=api_key.project_id,
-        principal=ApiKeyPrincipal(
-            api_key_id=api_key.id,
-            name=api_key.name,
-            key_prefix=api_key.key_prefix,
-            scopes=frozenset(ApiKeyScope(scope) for scope in api_key.scopes),
-        ),
+        name=api_key.name,
+        key_prefix=api_key.key_prefix,
+        key_hash=api_key.key_hash,
+        scopes=tuple(api_key.scopes),
+        expires_at=api_key.expires_at,
     )
+    if cache is not None:
+        await cache.put(entry)
+    return _context_from_cache(entry)
 
 
 async def get_project_overview(

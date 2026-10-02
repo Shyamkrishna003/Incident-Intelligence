@@ -19,6 +19,7 @@ from confluent_kafka import KafkaException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incident_intel.audit.service import CLI_ACTOR
+from incident_intel.cache.services import build_redis_cache
 from incident_intel.core.config import (
     RuntimeSettings,
     Settings,
@@ -128,12 +129,29 @@ async def _bootstrap(session: AsyncSession, args: argparse.Namespace, pepper: st
     _print_issued(issued)
 
 
-async def _api_keys(session: AsyncSession, args: argparse.Namespace, pepper: str) -> None:
+async def _revoke(session: AsyncSession, prefix: str, settings: Settings) -> None:
+    cache = build_redis_cache(settings)
+    try:
+        await revoke_api_key(session, key_prefix=prefix, actor=CLI_ACTOR)
+        print(f"Revoked API key {prefix}.", file=sys.stderr)
+        # The API caches verified keys briefly; drop the entry so revocation is immediate.
+        if not await cache.api_keys.invalidate(prefix):
+            print(
+                "warning: Redis is unreachable, so the key could not be removed from the "
+                "API-key cache. It may keep working for up to "
+                f"{settings.api_key_cache_ttl_seconds} seconds.",
+                file=sys.stderr,
+            )
+    finally:
+        await cache.close()
+
+
+async def _api_keys(session: AsyncSession, args: argparse.Namespace, settings: Settings) -> None:
     if args.key_command == "revoke":
-        api_key = await revoke_api_key(session, key_prefix=args.prefix, actor=CLI_ACTOR)
-        print(f"Revoked API key {api_key.key_prefix}.", file=sys.stderr)
+        await _revoke(session, args.prefix, settings)
         return
 
+    pepper = settings.api_key_pepper.get_secret_value()
     project = await get_project_by_slugs(
         session, organization_slug=args.org, project_slug=args.project
     )
@@ -166,13 +184,13 @@ async def _api_keys(session: AsyncSession, args: argparse.Namespace, pepper: str
 
 async def _run_tenancy(args: argparse.Namespace, settings: Settings) -> None:
     engine = create_engine(settings)
-    pepper = settings.api_key_pepper.get_secret_value()
     try:
         async with create_session_factory(engine)() as session:
             if args.command == "bootstrap":
+                pepper = settings.api_key_pepper.get_secret_value()
                 await _bootstrap(session, args, pepper)
             elif args.command == "api-keys":
-                await _api_keys(session, args, pepper)
+                await _api_keys(session, args, settings)
     finally:
         await engine.dispose()
 

@@ -7,8 +7,14 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from incident_intel.cache.services import CacheServices
 from incident_intel.core.config import Settings
-from incident_intel.core.errors import AuthenticationError, PermissionDeniedError
+from incident_intel.core.errors import (
+    AuthenticationError,
+    PermissionDeniedError,
+    RateLimitedError,
+    ServiceUnavailableError,
+)
 from incident_intel.db.session import get_session
 from incident_intel.streaming.producer import MessagePublisher
 from incident_intel.tenancy.api_keys import ApiKeyScope
@@ -30,12 +36,18 @@ def get_publisher(request: Request) -> MessagePublisher:
     return publisher
 
 
+def get_cache(request: Request) -> CacheServices:
+    cache: CacheServices = request.app.state.cache
+    return cache
+
+
 async def get_tenant_context(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
     session: Annotated[AsyncSession, Depends(get_session)],
     settings: Annotated[Settings, Depends(get_settings_dep)],
+    cache: Annotated[CacheServices, Depends(get_cache)],
 ) -> TenantContext:
-    """Authenticate a project API key and bind the tenant scope to the log context."""
+    """Authenticate a project API key, apply its rate limit, and bind the log context."""
     if credentials is None:
         logger.info("api_key_rejected", reason="missing")
         raise AuthenticationError("missing")
@@ -44,6 +56,7 @@ async def get_tenant_context(
             session,
             credentials.credentials,
             pepper=settings.api_key_pepper.get_secret_value(),
+            cache=cache.api_keys,
             last_used_resolution=timedelta(seconds=settings.api_key_last_used_resolution_seconds),
         )
     except AuthenticationError as exc:
@@ -54,6 +67,14 @@ async def get_tenant_context(
         project_id=str(ctx.project_id),
         api_key_prefix=ctx.principal.key_prefix,
     )
+
+    # Limited per API key, after authentication, so one key cannot exhaust another's budget.
+    decision = await cache.rate_limiter.check(str(ctx.principal.api_key_id))
+    if not decision.allowed:
+        if decision.limiter_unavailable:  # only when RATE_LIMIT_FAIL_OPEN=false
+            raise ServiceUnavailableError("Rate limiting is temporarily unavailable.")
+        logger.info("rate_limited", retry_after_seconds=decision.retry_after_seconds)
+        raise RateLimitedError(retry_after_seconds=decision.retry_after_seconds)
     return ctx
 
 

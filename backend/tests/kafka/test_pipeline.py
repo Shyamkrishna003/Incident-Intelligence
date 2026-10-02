@@ -26,6 +26,7 @@ from incident_intel.streaming.topics import ALL_TOPICS, METRICS, METRICS_DLQ, to
 from incident_intel.telemetry.consumer import MetricBatchHandler
 from incident_intel.telemetry.models import IngestBatch, MetricPoint
 from tests.conftest import TenantFactory, _TestEnvironment
+from tests.support import FakeCache
 
 pytestmark = [pytest.mark.integration, pytest.mark.kafka]
 
@@ -59,7 +60,13 @@ async def kafka_publisher(kafka_settings: Settings) -> AsyncIterator[KafkaPublis
 async def kafka_client(
     kafka_settings: Settings, kafka_publisher: KafkaPublisher, db_session: AsyncSession
 ) -> AsyncIterator[AsyncClient]:
-    app: FastAPI = create_app(kafka_settings, publisher=kafka_publisher)
+    app: FastAPI = create_app(
+        kafka_settings,
+        publisher=kafka_publisher,
+        # Redis "down": these tests prove the pipeline's own guarantees (the storage
+        # consumer's dedupe), which must hold without the API-edge idempotency check.
+        cache=FakeCache(unavailable=True).services(),
+    )
 
     async def _test_session() -> AsyncIterator[AsyncSession]:
         yield db_session

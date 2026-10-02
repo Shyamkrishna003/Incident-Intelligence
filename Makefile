@@ -32,8 +32,8 @@ lock: ## Re-resolve pinned dependencies after editing backend/pyproject.toml
 db: ## Start PostgreSQL only
 	$(COMPOSE) up -d --wait postgres
 
-infra: venv ## Start PostgreSQL + Kafka, create topics (enough for host-run API, consumer, tests)
-	$(COMPOSE) up -d --wait postgres kafka
+infra: venv ## Start PostgreSQL + Kafka + Redis, create topics (enough for host-run API and tests)
+	$(COMPOSE) up -d --wait postgres kafka redis
 	cd backend && $(VENV_BIN)/ii kafka init
 
 kafka-init: venv ## Create missing Kafka topics
@@ -67,8 +67,8 @@ bootstrap: venv ## Create an org, project, and API key: make bootstrap ORG=acme 
 test: venv ## Run all tests (needs `make infra`)
 	cd backend && $(VENV_BIN)/pytest
 
-test-unit: venv ## Run tests that need neither PostgreSQL nor Kafka
-	cd backend && $(VENV_BIN)/pytest -m "not integration and not kafka"
+test-unit: venv ## Run tests that need no PostgreSQL, Kafka, or Redis
+	cd backend && $(VENV_BIN)/pytest -m "not integration and not kafka and not redis"
 
 lint: venv ## Lint and check formatting
 	cd backend && $(VENV_BIN)/ruff check src tests && $(VENV_BIN)/ruff format --check src tests

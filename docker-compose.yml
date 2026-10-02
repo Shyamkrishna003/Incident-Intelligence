@@ -1,5 +1,4 @@
-# Local development stack. Services are added slice by slice as they gain a real job
-# (Redis arrives in slice 2b).
+# Local development stack. Services are added slice by slice as they gain a real job.
 name: incident-intel
 
 # Settings shared by every container built from ./backend. API secrets are NOT here:
@@ -65,6 +64,20 @@ services:
       retries: 12
       start_period: 15s
 
+  # Cache and rate limiter only: no persistence, bounded memory. Losing its contents is
+  # safe (every use has a fallback), so there is no data volume.
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      # Published on localhost only; no password is for local development.
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # One-shot jobs: apply migrations and create Kafka topics before the app starts.
   migrate:
     build: ./backend
@@ -87,6 +100,9 @@ services:
     environment:
       <<: *backend-env
       API_KEY_PEPPER: ${API_KEY_PEPPER:?run make env}
+      REDIS_URL: redis://redis:6379/0
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-600}
+      RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -94,6 +110,9 @@ services:
         condition: service_completed_successfully
       kafka-init:
         condition: service_completed_successfully
+      # Started, not healthy: the API runs (degraded) without Redis.
+      redis:
+        condition: service_started
 
   # Kafka telemetry.metrics.v1 → PostgreSQL. Scale with `--scale storage-consumer=N`
   # (up to the topic's partition count).

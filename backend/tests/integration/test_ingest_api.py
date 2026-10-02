@@ -8,7 +8,7 @@ from httpx import AsyncClient
 from incident_intel.telemetry.messages import MetricBatchMessage
 from incident_intel.tenancy.api_keys import ApiKeyScope
 from tests.conftest import TenantFactory
-from tests.support import FakePublisher
+from tests.support import FakeCache, FakePublisher
 
 pytestmark = pytest.mark.integration
 
@@ -192,3 +192,87 @@ async def test_kafka_outage_returns_503_with_retry_after(
     assert response.status_code == 503
     assert response.headers["Retry-After"] == "5"
     assert response.json()["error"]["code"] == "service_unavailable"
+
+
+# --- Idempotency at the API edge (Redis-backed; an in-memory fake here) --------------------
+
+
+async def test_retry_of_a_published_batch_is_not_published_again(
+    client: AsyncClient, make_tenant: TenantFactory, publisher: FakePublisher
+) -> None:
+    tenant = await make_tenant()
+    body = _body(1.0, 2.0)
+    headers = _headers(tenant.auth_headers, "retry-me")
+
+    first = await client.post("/v1/ingest/metrics", json=body, headers=headers)
+    retry = await client.post("/v1/ingest/metrics", json=body, headers=headers)
+
+    assert (first.status_code, retry.status_code) == (202, 202)
+    assert retry.json() == first.json()
+    assert len(publisher.messages) == 1
+
+
+async def test_reusing_a_key_with_different_data_is_a_409(
+    client: AsyncClient, make_tenant: TenantFactory, publisher: FakePublisher
+) -> None:
+    tenant = await make_tenant()
+    headers = _headers(tenant.auth_headers, "reused")
+    await client.post("/v1/ingest/metrics", json=_body(1.0), headers=headers)
+
+    response = await client.post("/v1/ingest/metrics", json=_body(999.0), headers=headers)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "idempotency_conflict"
+    assert len(publisher.messages) == 1  # the conflicting batch never reached Kafka
+
+
+async def test_retry_after_a_failed_publish_is_published(
+    client: AsyncClient, make_tenant: TenantFactory, publisher: FakePublisher
+) -> None:
+    tenant = await make_tenant()
+    body = _body(1.0)
+    headers = _headers(tenant.auth_headers, "kafka-was-down")
+    publisher.fail_publish = True
+    failed = await client.post("/v1/ingest/metrics", json=body, headers=headers)
+    assert failed.status_code == 503
+
+    publisher.fail_publish = False
+    retry = await client.post("/v1/ingest/metrics", json=body, headers=headers)
+
+    # The claim was left "pending", so the retry must reach Kafka (not be mistaken for done).
+    assert retry.status_code == 202
+    assert len(publisher.messages) == 1
+
+
+async def test_rejected_batch_does_not_use_up_its_key(
+    client: AsyncClient, make_tenant: TenantFactory, publisher: FakePublisher
+) -> None:
+    tenant = await make_tenant()
+    headers = _headers(tenant.auth_headers, "fix-and-resend")
+    invalid = _body(1.0)
+    invalid["points"][0]["timestamp"] = "2000-01-01T00:00:00Z"
+    assert (
+        await client.post("/v1/ingest/metrics", json=invalid, headers=headers)
+    ).status_code == 422
+
+    corrected = await client.post("/v1/ingest/metrics", json=_body(1.0), headers=headers)
+
+    assert corrected.status_code == 202
+    assert len(publisher.messages) == 1
+
+
+async def test_redis_outage_does_not_block_ingestion(
+    client: AsyncClient, make_tenant: TenantFactory, publisher: FakePublisher, cache: FakeCache
+) -> None:
+    tenant = await make_tenant()
+    cache.unavailable = True
+    body = _body(1.0)
+    headers = _headers(tenant.auth_headers, "redis-down")
+
+    first = await client.post("/v1/ingest/metrics", json=body, headers=headers)
+    retry = await client.post("/v1/ingest/metrics", json=body, headers=headers)
+
+    assert (first.status_code, retry.status_code) == (202, 202)
+    assert first.json()["batch_id"] == retry.json()["batch_id"]
+    # Without the edge check both reach Kafka; the storage consumer stores the batch once.
+    assert len(publisher.messages) == 2

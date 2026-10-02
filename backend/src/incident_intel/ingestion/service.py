@@ -6,7 +6,8 @@ from datetime import UTC, datetime
 
 import structlog
 
-from incident_intel.core.errors import ServiceUnavailableError
+from incident_intel.cache.idempotency import ClaimOutcome, IdempotencyStore
+from incident_intel.core.errors import IdempotencyKeyReusedError, ServiceUnavailableError
 from incident_intel.ingestion.normalize import IngestLimits, normalize_points
 from incident_intel.ingestion.schemas import MetricBatchIn
 from incident_intel.streaming.producer import MessagePublisher, PublishError
@@ -36,6 +37,7 @@ async def accept_metric_batch(
     batch: MetricBatchIn,
     idempotency_key: str,
     publisher: MessagePublisher,
+    idempotency: IdempotencyStore,
     topic: str,
     limits: IngestLimits,
     request_id: str | None = None,
@@ -43,14 +45,29 @@ async def accept_metric_batch(
 ) -> AcceptedBatch:
     now = now or datetime.now(UTC)
     points = normalize_points(batch.points, now=now, limits=limits)
+    batch_id = derive_batch_id(ctx.project_id, idempotency_key)
+    content_sha256 = points_content_hash(points)
+
+    # Claimed only after validation, so a rejected batch never burns its key.
+    claim = await idempotency.claim(ctx.project_id, idempotency_key, content_sha256)
+    if claim is ClaimOutcome.CONFLICT:
+        logger.info("idempotency_key_reused", batch_id=str(batch_id))
+        raise IdempotencyKeyReusedError()
+    if claim is ClaimOutcome.PUBLISHED:
+        # A retry of a batch Kafka already acknowledged: same answer, no second message.
+        logger.info("metric_batch_replayed", batch_id=str(batch_id), points=len(points))
+        return AcceptedBatch(batch_id=batch_id, accepted_points=len(points))
+    # NEW, IN_FLIGHT, or UNAVAILABLE: publish. A possible duplicate message is harmless
+    # because the storage consumer stores each batch id once.
+
     message = MetricBatchMessage(
-        batch_id=derive_batch_id(ctx.project_id, idempotency_key),
+        batch_id=batch_id,
         # Tenant identity comes only from the verified API key, never from the request body.
         organization_id=ctx.organization_id,
         project_id=ctx.project_id,
         api_key_id=ctx.principal.api_key_id,
         idempotency_key=idempotency_key,
-        content_sha256=points_content_hash(points),
+        content_sha256=content_sha256,
         received_at=now,
         points=points,
     )
@@ -72,5 +89,7 @@ async def accept_metric_batch(
         )
         raise ServiceUnavailableError("The telemetry pipeline is temporarily unavailable.") from exc
 
+    if claim is not ClaimOutcome.UNAVAILABLE:
+        await idempotency.mark_published(ctx.project_id, idempotency_key, content_sha256)
     logger.info("metric_batch_accepted", batch_id=str(message.batch_id), points=len(points))
     return AcceptedBatch(batch_id=message.batch_id, accepted_points=len(points))

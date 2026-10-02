@@ -8,6 +8,7 @@
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
 import structlog
@@ -55,6 +56,10 @@ async def check_database(
     return {"database": "ok", "migrations": "ok"}
 
 
+async def check_redis(ping: Callable[[], Awaitable[bool]]) -> dict[str, CheckStatus]:
+    return {"redis": "ok" if await ping() else "unavailable"}
+
+
 async def check_kafka(
     publisher: MessagePublisher, *, topics: list[str], timeout_seconds: float
 ) -> dict[str, CheckStatus]:
@@ -84,14 +89,17 @@ async def healthz() -> LivenessResponse:
 async def readyz(request: Request, response: Response) -> ReadinessResponse:
     state = request.app.state
     timeout = state.settings.readiness_timeout_seconds
-    database, kafka = await asyncio.gather(
+    database, kafka, redis = await asyncio.gather(
         check_database(
             state.engine, expected_head=state.expected_migration_head, timeout_seconds=timeout
         ),
         check_kafka(state.publisher, topics=[state.metrics_topic], timeout_seconds=timeout),
+        check_redis(state.cache.ping),
     )
-    checks = {**database, **kafka}
-    ready = all(status == "ok" for status in checks.values())
+    required = {**database, **kafka}
+    ready = all(status == "ok" for status in required.values())
     if not ready:
         response.status_code = 503
-    return ReadinessResponse(status="ready" if ready else "not_ready", checks=checks)
+    # Redis is reported but not required: every use of it has a fallback, so an outage
+    # must not take the API out of rotation.
+    return ReadinessResponse(status="ready" if ready else "not_ready", checks={**required, **redis})

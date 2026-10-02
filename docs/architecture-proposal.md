@@ -506,3 +506,39 @@ Verified on the Docker stack:
 - topics survive a broker restart
 
 Pinned: `confluent-kafka` 2.15.1 (librdkafka 2.15.1), image `apache/kafka:4.3.1`.
+
+---
+
+## 15. Slice 2b (Redis): implementation record
+
+Redis now does three jobs at the API edge. It is never the source of truth and runs without persistence.
+
+| Job | How | When Redis is down |
+|---|---|---|
+| Rate limiting per API key | Fixed-window counter (`INCR` + `EXPIRE` in one `MULTI`), key `ii:rl:<api key id>:<window>`. Default 600 requests per 60 s. Over the limit → 429 with `Retry-After`. | Requests are let through (`RATE_LIMIT_FAIL_OPEN=false` answers 503 instead). |
+| Idempotency claims | `SET NX` of `<content hash>:pending` under `ii:idem:<project>:<key>` for 24 h, switched to `published` after Kafka acknowledges. Different content → 409. A retry of a `published` batch returns the same `batch_id` without publishing. | The check is skipped. The storage consumer still stores each batch once and dead-letters conflicts. |
+| API-key cache | The verified key record (HMAC, tenant ids, scopes, expiry) under `ii:apikey:<prefix>` for 60 s. Only active keys are cached. Revocation deletes the entry. | Authentication uses PostgreSQL. |
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| A retry of a `pending` claim publishes again | The first attempt may have died before reaching Kafka. Skipping the publish there could lose data; a duplicate message is harmless because the consumer dedupes. Only a Kafka-acknowledged batch is skipped on retry. |
+| The claim is made after validation | A batch rejected with 422 doesn't use up its Idempotency-Key. |
+| `RedisGateway` with a circuit breaker | One error type for callers, and after a failure Redis is skipped for 5 s, so an outage costs one short timeout (0.25 s) instead of one per request. Client-side retries are off. |
+| `/readyz` reports Redis but doesn't require it | Every use has a fallback, so an outage must not take the API out of rotation. |
+| Fixed window instead of a token bucket | No Lua script, easy to reason about. It allows up to 2x the limit across a window boundary, which is acceptable for flood protection. |
+| Rate limit applied after authentication, per key | One key can't use up another's budget. Unauthenticated floods aren't limited yet (a per-IP limit belongs at the edge, in the hardening slice). |
+| Revocation invalidates the cache from the CLI | Immediate when Redis is reachable. Otherwise the CLI warns that the key may work for up to the cache TTL. |
+| In-memory `FakeCache` plus a contract test suite | Most tests need no Redis. The same behavioral tests run against the fake and real Redis, so the fake can't drift. |
+| Kafka end-to-end tests run with the cache "unavailable" | They prove the pipeline's own guarantees hold without the API-edge check. |
+| Dockerfile: pip cache mount, longer timeouts | Image builds failed on a slow connection to PyPI. |
+
+Verified on the running stack:
+- a retried batch reaches Kafka once; different data under the same key gets 409
+- the ninth request against a limit of 8 gets 429 with `Retry-After`
+- a cached key is rejected immediately after `ii api-keys revoke`
+- with Redis stopped: requests and ingestion succeed in milliseconds, `/readyz` stays ready and reports `redis: unavailable`, and the CLI warns on revoke
+- after Redis restarts, the API recovers on its own (`redis_unavailable` and `redis_recovered` are each logged once)
+
+Pinned: `redis` (Python client) 8.1.0, image `redis:8-alpine` (8.10.2 at implementation).

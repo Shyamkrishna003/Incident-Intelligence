@@ -4,7 +4,8 @@ from typing import Annotated, Any
 import structlog
 from fastapi import APIRouter, Depends, Header, Request
 
-from incident_intel.api.deps import get_publisher, get_settings_dep, require_scope
+from incident_intel.api.deps import get_cache, get_publisher, get_settings_dep, require_scope
+from incident_intel.cache.services import CacheServices
 from incident_intel.core.config import Settings
 from incident_intel.ingestion.normalize import IngestLimits
 from incident_intel.ingestion.schemas import IngestAccepted, MetricBatchIn
@@ -21,7 +22,9 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     401: {"description": "Missing or invalid API key"},
     403: {"description": "API key lacks the ingest:write scope"},
     413: {"description": "Request body too large"},
+    409: {"description": "Idempotency-Key already used with different data"},
     422: {"description": "Invalid batch; nothing was accepted"},
+    429: {"description": "Rate limit exceeded for this API key; see Retry-After"},
     503: {"description": "Pipeline unavailable; retry with the same Idempotency-Key"},
 }
 
@@ -46,6 +49,7 @@ async def ingest_metrics(
     ctx: Annotated[TenantContext, Depends(require_scope(ApiKeyScope.INGEST_WRITE))],
     publisher: Annotated[MessagePublisher, Depends(get_publisher)],
     settings: Annotated[Settings, Depends(get_settings_dep)],
+    cache: Annotated[CacheServices, Depends(get_cache)],
 ) -> IngestAccepted:
     """Accept a batch of metric points.
 
@@ -58,6 +62,7 @@ async def ingest_metrics(
         batch=batch,
         idempotency_key=idempotency_key,
         publisher=publisher,
+        idempotency=cache.idempotency,
         topic=request.app.state.metrics_topic,
         limits=IngestLimits(
             max_point_age=timedelta(seconds=settings.ingest_max_point_age_seconds),

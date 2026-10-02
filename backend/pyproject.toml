@@ -17,6 +17,7 @@ dependencies = [
     "alembic>=1.14",
     "structlog>=24.4",
     "confluent-kafka>=2.15",
+    "redis>=8.0",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +48,7 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "integration: requires the test PostgreSQL database",
     "kafka: requires a Kafka broker (TEST_KAFKA_BOOTSTRAP_SERVERS)",
+    "redis: requires a Redis server (TEST_REDIS_URL)",
 ]
 addopts = "-ra --strict-markers"
 filterwarnings = ["error"]

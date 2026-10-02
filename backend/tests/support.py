@@ -1,13 +1,18 @@
 """Helpers shared by unit and integration tests."""
 
+import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from pydantic import SecretStr
 
+from incident_intel.cache.api_keys import CachedApiKey
+from incident_intel.cache.idempotency import ClaimOutcome, classify_existing
+from incident_intel.cache.rate_limit import RateLimitDecision, window_position
+from incident_intel.cache.services import CacheServices
 from incident_intel.core.config import Settings
 from incident_intel.streaming.producer import PublishError
 from incident_intel.telemetry.messages import (
@@ -67,6 +72,81 @@ class FakePublisher:
 
     async def close(self) -> None:
         self.closed = True
+
+
+@dataclass
+class FakeCache:
+    """In-memory stand-in for the Redis-backed services. Can simulate a Redis outage.
+
+    `tests/cache/test_cache_contract.py` runs the same behavioral tests against this class
+    and the real Redis implementations, so the two cannot drift apart unnoticed.
+    """
+
+    limit: int = 1000
+    window_seconds: int = 60
+    fail_open: bool = True
+    unavailable: bool = False
+    clock: Callable[[], float] = time.time
+    counters: dict[tuple[str, int], int] = field(default_factory=dict)
+    claims: dict[tuple[uuid.UUID, str], str] = field(default_factory=dict)
+    api_keys: dict[str, CachedApiKey] = field(default_factory=dict)
+    closed: bool = False
+
+    # --- RateLimiter ---
+    async def check(self, subject: str) -> RateLimitDecision:
+        if self.unavailable:
+            return RateLimitDecision(allowed=self.fail_open, limiter_unavailable=True)
+        index, seconds_left = window_position(self.clock(), self.window_seconds)
+        count = self.counters.get((subject, index), 0) + 1
+        self.counters[subject, index] = count
+        if count > self.limit:
+            return RateLimitDecision(allowed=False, retry_after_seconds=seconds_left)
+        return RateLimitDecision(allowed=True)
+
+    # --- IdempotencyStore ---
+    async def claim(
+        self, project_id: uuid.UUID, idempotency_key: str, content_sha256: str
+    ) -> ClaimOutcome:
+        if self.unavailable:
+            return ClaimOutcome.UNAVAILABLE
+        key = (project_id, idempotency_key)
+        if key not in self.claims:
+            self.claims[key] = f"{content_sha256}:pending"
+            return ClaimOutcome.NEW
+        return classify_existing(self.claims[key], content_sha256)
+
+    async def mark_published(
+        self, project_id: uuid.UUID, idempotency_key: str, content_sha256: str
+    ) -> None:
+        key = (project_id, idempotency_key)
+        if not self.unavailable and key in self.claims:
+            self.claims[key] = f"{content_sha256}:published"
+
+    # --- ApiKeyCache ---
+    async def get(self, key_prefix: str) -> CachedApiKey | None:
+        return None if self.unavailable else self.api_keys.get(key_prefix)
+
+    async def put(self, entry: CachedApiKey) -> None:
+        if not self.unavailable:
+            self.api_keys[entry.key_prefix] = entry
+
+    async def invalidate(self, key_prefix: str) -> bool:
+        if self.unavailable:
+            return False
+        self.api_keys.pop(key_prefix, None)
+        return True
+
+    # --- lifecycle ---
+    async def ping(self) -> bool:
+        return not self.unavailable
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def services(self) -> CacheServices:
+        return CacheServices(
+            rate_limiter=self, idempotency=self, api_keys=self, ping=self.ping, close=self.close
+        )
 
 
 def metric_point(
