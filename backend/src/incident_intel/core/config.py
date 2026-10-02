@@ -66,6 +66,13 @@ class RuntimeSettings(DatabaseSettings):
     # An anomaly open this long is closed and its level accepted as the new normal.
     detection_max_open_seconds: int = Field(default=6 * 3600, ge=60)
 
+    # Incident grouping. An anomaly can join an incident if it started within this long of
+    # the incident's activity (and is on the same or a directly dependent service).
+    correlation_window_seconds: int = Field(default=15 * 60, ge=0)
+    # Deployments of an incident's services this long before it started are linked as
+    # candidates for "what changed".
+    deployment_lookback_seconds: int = Field(default=60 * 60, ge=0)
+
 
 class Settings(RuntimeSettings):
     # Server-side secret mixed into API-key hashes. Rotating it invalidates all keys.

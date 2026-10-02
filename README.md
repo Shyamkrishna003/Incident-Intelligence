@@ -10,7 +10,7 @@ AI-assisted incident detection, investigation, root-cause analysis, and reliabil
 
 ## Status
 
-Implemented through **slice 5: *Observe* (metrics, logs, deployments) and *Detect* (anomaly detection), with sign-in for people, a web app, and a scenario simulator**:
+Implemented through **slice 6: *Observe* (metrics, logs, deployments), *Detect* (anomaly detection) and *Correlate* (incidents), with sign-in for people, a web app, and a scenario simulator**:
 
 - **Foundation (slice 1):**
   - FastAPI backend with typed configuration, structured JSON logs (with secret redaction), and request IDs.
@@ -51,7 +51,14 @@ Implemented through **slice 5: *Observe* (metrics, logs, deployments) and *Detec
   - `ii eval detection` scores the detectors on labelled synthetic scenarios. The default was chosen from those results.
   - The web app lists anomalies and shades them on the metric chart.
 
-Next come incidents (grouping related anomalies), then AI investigation. See the architecture doc, §11.
+- **Incidents (slice 6):**
+  - Related anomalies are grouped into one incident, using time and declared service dependencies.
+  - Every grouping decision is recorded on the incident's timeline with the rule that made it.
+  - Deployments of the affected services shortly before or during the incident are linked as candidates, never stated as the cause.
+  - An incident resolves when all its anomalies end, and reopens if a related one appears soon after.
+  - The web app has an incident list and a detail page: what was observed, what changed, what isn't known, and the timeline.
+
+Next comes AI investigation: gathering this evidence and producing a structured, cited analysis. See the architecture doc, §11.
 
 ## How ingestion works
 
@@ -152,6 +159,40 @@ These results describe behaviour on synthetic scenarios only. They are not evide
 
 Detection settings (`DETECTION_*` in the environment) should be changed only together with a new evaluation run.
 
+## Incidents
+
+One problem usually shows up as many anomalies. Grouping turns them into one incident.
+
+**When an anomaly opens, it joins an existing incident if both are true:**
+
+1. **Time:** it started no more than 15 minutes before the incident started, and no more than 15 minutes after the incident's latest activity.
+2. **Place:** its service is already in the incident (`same_service`), or a declared dependency directly connects it to one of the incident's services, in either direction (`dependency`).
+
+Otherwise it opens a new incident. Two hops of dependency don't count: A and C are not grouped just because both relate to B.
+
+- **Merging.** If one anomaly is related to two incidents (it bridges them), they are merged into the older one. The other is marked `merged` and points to it.
+- **Resolving and reopening.** An incident resolves when none of its anomalies is open. A related anomaly starting within 15 minutes of that reopens it.
+- **Candidate deployments.** Deployments of the incident's services from one hour before it started until its latest activity are linked, as `before` or `during`. A link means "this service is affected and was deployed around then". It is not a finding that the deployment caused anything.
+- **Severity** is the worst severity among the incident's anomalies.
+- **Timeline.** Each decision is recorded with its rule: `incident_opened`, `anomaly_attached` (with `same_service` or the dependency used), `deployment_linked`, `anomaly_ended`, `incident_resolved`, `incident_reopened`, `incidents_merged`.
+
+Grouping happens in the detection consumer, in the same transaction that stores the anomalies, so an anomaly and its incident are saved together.
+
+**These rules group; they don't diagnose.** The incident page says so: it lists what was observed, what changed, and states that the cause is not yet known.
+
+### Service dependencies
+
+Grouping across services needs to know which service calls which. Declare it with `PUT /v1/dependencies` (the whole set is replaced each time):
+
+```bash
+curl -X PUT localhost:8000/v1/dependencies -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dependencies": [{"service": "checkout-web", "depends_on": "payment-api"},
+                        {"service": "payment-api", "depends_on": "payments-db"}]}'
+```
+
+Without declared dependencies, anomalies on different services become separate incidents. The simulator declares its own.
+
 ## Scenario simulator
 
 `ii simulate` produces a synthetic incident modelled on the PRD's example and sends it through the real ingestion API, so detection and investigation can be built and evaluated without production data.
@@ -175,6 +216,7 @@ The scenario, relative to the incident start `T`:
 - **Always labelled.** Every metric series and log record carries `source=simulator`, and deployments have `deployed_by: simulator` and say "synthetic" in their description.
 - **Deterministic.** The same `--seed` and time period produce identical data, so re-running over the same period is recognized as a retry and stores nothing twice.
 - **The API key** is read from the `SIMULATOR_API_KEY` environment variable, not a flag, because command lines are visible to other users on the machine. It needs the `ingest:write` scope.
+- The simulator declares its services' dependencies (`checkout-web` → `payment-api` → `payments-db`, and `checkout-web` → `inventory-api`), so its incident is grouped the way a real one would be.
 - The simulator waits and retries when the API answers 429 or 503.
 
 ## Two kinds of caller
@@ -184,7 +226,7 @@ The scenario, relative to the incident start `T`:
 | Credential | Project API key: `Authorization: Bearer ii_...` | Firebase ID token: `Authorization: Bearer <token>` |
 | Scope | Exactly one project, fixed by the key | Every organization the user is a member of |
 | Permissions | Key scopes: `ingest:write`, `telemetry:read` | Role in the organization (below) |
-| Endpoints | `/v1/project`, `/v1/ingest/...`, `/v1/services/...`, `/v1/deployments`, `/v1/anomalies` | `/v1/me`, `/v1/organizations/...`, `/v1/projects/...` |
+| Endpoints | `/v1/project`, `/v1/ingest/...`, `/v1/services/...`, `/v1/deployments`, `/v1/anomalies`, `/v1/incidents`, `/v1/dependencies` | `/v1/me`, `/v1/organizations/...`, `/v1/projects/...` |
 
 The two are not interchangeable: an API key is rejected on user endpoints, and an ID token on key endpoints.
 
@@ -269,6 +311,8 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 |---|---|
 | Sign in | Email/password, Google or GitHub. If the email already belongs to an account with a different method, the app asks the user to sign in the original way and then links the new method. |
 | Setup | Shown until the user can reach a project. Asks for email verification first, then creates an organization and its first project. If setup was interrupted after the organization was created, it asks only for the project. |
+| Incidents | The landing page. Incidents in the last 7 days, ongoing first, with severity, affected services, duration and anomaly count. |
+| Incident | **What was observed** (each anomaly with its evidence and a link to its chart), **What changed** (candidate deployments, labelled as candidates), **Not yet known** (the cause), and the **Timeline** with the reason for each grouping decision. |
 | Services | The services that have sent telemetry to the selected project. Refreshes when opened and every 30 seconds. |
 | Service | Pick a metric and a time range (15 minutes to 24 hours). One line per series (attribute set), a legend, a hover readout of every series, and the same values as a table. Deployments of the service are marked on the chart, and periods with a detected anomaly are shaded. Below it, the service's logs for the same time range, filterable by severity and text. Refreshes every 30 seconds. |
 | Anomalies | Anomalies in the last 24 hours, ongoing first. Each row shows the evidence ("rose to 1,700 ms, usually about 120 ms") and links to the metric's chart. |
@@ -293,6 +337,10 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | GET | `/v1/services/{service}/logs` | API key with `telemetry:read` | Log records in `[start, end)` (default: the last hour; at most 24 h), newest first. `severity` returns that level and above; `q` matches text in the message; `limit` is at most 1000. |
 | GET | `/v1/deployments` | API key with `telemetry:read` | Deployments in `[start, end)` (default: the last 7 days; at most 31), newest first. `service` filters to one service. |
 | GET | `/v1/anomalies` | API key with `telemetry:read` | Anomalies overlapping `[start, end)` (default: the last 24 hours; at most 31 days), ongoing first. Filters: `status` (`open`, `closed`, `all`), `service`, `metric`. |
+| GET | `/v1/incidents` | API key with `telemetry:read` | Incidents overlapping `[start, end)` (default: the last 7 days; at most 31), ongoing first. `status` is `open`, `resolved` or `all`. Merged incidents are left out. |
+| GET | `/v1/incidents/{incident_id}` | API key with `telemetry:read` | One incident with its anomalies, candidate deployments, timeline, and the declared dependencies among its services. |
+| GET | `/v1/dependencies` | API key with `telemetry:read` | The project's declared service dependencies |
+| PUT | `/v1/dependencies` | API key with `ingest:write` | Replace the declared dependencies (at most 500). Registers services that haven't sent telemetry yet. |
 | GET | `/v1/services` | API key with `telemetry:read` | Services that have sent telemetry to this project |
 | GET | `/v1/me` | signed-in user | The user, their organizations and roles, and each organization's projects. Creates the user record on first call. |
 | POST | `/v1/organizations` | signed-in user, verified email | Create an organization. The caller becomes its owner. |
@@ -305,6 +353,9 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | GET | `/v1/projects/{project_id}/services/{service}/logs` | any member | Log records, same parameters as the API-key endpoint |
 | GET | `/v1/projects/{project_id}/deployments` | any member | Deployments, same parameters as the API-key endpoint |
 | GET | `/v1/projects/{project_id}/anomalies` | any member | Anomalies, same parameters as the API-key endpoint |
+| GET | `/v1/projects/{project_id}/incidents` and `.../incidents/{incident_id}` | any member | Incidents, same as the API-key endpoints |
+| GET | `/v1/projects/{project_id}/dependencies` | any member | Declared service dependencies |
+| PUT | `/v1/projects/{project_id}/dependencies` | admin or owner | Replace the declared dependencies |
 | GET | `/v1/services/{service}/metrics` | API key with `telemetry:read` | The metrics a service has reported, with the number of series each has. Also at `/v1/projects/{project_id}/services/{service}/metrics` for signed-in users. |
 | GET | `/v1/services/{service}/metrics/{metric}` | API key with `telemetry:read` | Points in `[start, end)` (default: the last hour; at most 24 h), grouped by attribute set. `limit` defaults to 1000 and can be at most 10 000; `truncated` is true if more points exist. |
 
@@ -382,6 +433,7 @@ ii simulate [--live] [--no-incident] [--backfill-minutes 60] [--incident-after-m
 - **Detection** is tested as pure logic (detectors, the anomaly engine), against PostgreSQL, and end to end through Kafka.
   - One test checks that evaluating a series a few points at a time through the database finds exactly the anomalies the pure engine finds in a single pass.
   - Another holds the default detector to its evaluated results.
+- **Incident grouping** is tested as pure rules and through the real detection handler against PostgreSQL: same service, dependency, the time window, merging, resolving and reopening, candidate deployments, timeline order, and isolation between projects.
 - **Consumer delivery rules** (commit only after success, retry transient errors, dead-letter permanent ones) are unit-tested with an in-memory message source.
 
 ### Layout
@@ -399,6 +451,7 @@ backend/
     streaming/   Kafka: topics, async publisher, consumer loop with dead-lettering, admin
     ingestion/   ingestion API: schemas, normalization, publishing
     telemetry/   message contracts, models, idempotent storage consumer, read APIs
+    incidents/   grouping rules, incident lifecycle and timeline, service dependencies, incidents API
     detection/   detectors, anomaly engine, detection consumer, evaluation suite, anomalies API
     simulator/   synthetic incident scenario, sender, backfill and live runner
     migrations/  Alembic environment and revisions (shipped inside the package)
@@ -447,7 +500,12 @@ See [.env.example](.env.example).
 - **Late metric points are not evaluated.** A point older than what its series has already been evaluated through is stored but skipped by detection.
 - **An anomaly on a series that stops reporting stays open** until a later point arrives.
 - **No user-configured thresholds or alert rules yet,** and no notifications. Anomalies are visible in the app and the API only.
-- **Anomalies aren't grouped yet.** One incident shows as several anomalies (seven in the simulated one). Grouping them into incidents is the next slice.
+- **Grouping depends on declared dependencies.** Without them, one problem spanning several services becomes several incidents. Dependencies aren't discovered from traces yet.
+- **Grouping has not been evaluated** against labelled cases the way detection has. It's verified on the simulated incident and by tests of each rule.
+- **No manual incident actions yet:** acknowledging, renaming, marking a false positive, merging or splitting by hand, and feedback all come with a later slice.
+- **Candidate deployments are found only when the incident has activity** (an anomaly opening, extending or ending). A deployment reported late is linked at the next such moment.
+- **Anomalies detected before this slice** have no incident.
+- **Dependencies can only be declared through the API,** not in the web app.
 - **No retention job.** Logs and metrics are kept indefinitely for now; the planned limits (7 days for logs, 30 for metrics) aren't enforced yet.
 - **Log search is a plain text match** within one service and time range, with no index. It's fine at this volume and will need revisiting at higher volume.
 - **Log queries return the newest matches only** (up to `limit`), with no paging to older ones.

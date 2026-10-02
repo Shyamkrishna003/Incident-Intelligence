@@ -4,17 +4,14 @@ import { Link } from "react-router-dom";
 import type { ProjectContext } from "../components/AppShell";
 import { EmptyState, ErrorState, LoadingState, PageHeader } from "../components/ui";
 import { useAnomalies } from "../hooks/queries";
-import { formatDateTime, formatValue, seriesLabel } from "../lib/format";
+import { formatDateTime, formatDuration, formatValue, seriesLabel } from "../lib/format";
 import type { Anomaly } from "../lib/types";
 
 const DAY_MINUTES = 24 * 60;
 
 function duration(anomaly: Anomaly): string {
   const end = anomaly.status === "open" ? Date.now() : Date.parse(anomaly.last_anomalous_at);
-  const minutes = Math.max(0, Math.round((end - Date.parse(anomaly.started_at)) / 60_000));
-  if (minutes < 1) return "under a minute";
-  if (minutes < 60) return `${minutes} min`;
-  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+  return formatDuration(anomaly.started_at, end);
 }
 
 /** Status in words; the dot only reinforces it. */

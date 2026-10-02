@@ -108,6 +108,7 @@ describe("MetricChart", () => {
             baseline_center: 100,
             baseline_spread: 5,
             point_count: 80,
+            incident_id: null,
           },
         ]}
       />,

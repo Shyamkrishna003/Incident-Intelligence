@@ -6,6 +6,8 @@ import type {
   AnomalyList,
   ApiKeyScope,
   DeploymentList,
+  IncidentDetail,
+  IncidentList,
   LogList,
   Me,
   Metric,
@@ -196,6 +198,21 @@ export const api = {
     if (filter.metric) query.set("metric", filter.metric);
     return request<AnomalyList>(`/v1/projects/${seg(projectId)}/anomalies?${query.toString()}`);
   },
+
+  listIncidents: (
+    projectId: string,
+    filter: { start: Date; end: Date; status?: "open" | "resolved" },
+  ) => {
+    const query = new URLSearchParams({
+      start: filter.start.toISOString(),
+      end: filter.end.toISOString(),
+    });
+    if (filter.status) query.set("status", filter.status);
+    return request<IncidentList>(`/v1/projects/${seg(projectId)}/incidents?${query.toString()}`);
+  },
+
+  getIncident: (projectId: string, incidentId: string) =>
+    request<IncidentDetail>(`/v1/projects/${seg(projectId)}/incidents/${seg(incidentId)}`),
 
   listApiKeys: (projectId: string) =>
     request<{ api_keys: ApiKey[] }>(`/v1/projects/${seg(projectId)}/api-keys`),

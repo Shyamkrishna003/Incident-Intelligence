@@ -152,8 +152,12 @@ class _Api:
     def __init__(self, statuses: list[int] | None = None) -> None:
         self.statuses = statuses or []
         self.requests: list[httpx.Request] = []
+        self.dependency_declarations: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "PUT":
+            self.dependency_declarations.append(request)
+            return httpx.Response(200, json={"dependencies": []})
         self.requests.append(request)
         status = self.statuses.pop(0) if self.statuses else 202
         headers = {"Retry-After": "0"} if status in {429, 503} else {}
@@ -234,6 +238,12 @@ async def test_backfill_covers_the_requested_period_and_places_the_incident() ->
     )
 
     assert summary.points == 240 * len(METRICS)
+    # The simulated services' dependencies are declared before any telemetry is sent.
+    [declaration] = api.dependency_declarations
+    assert declaration.url.path == "/v1/dependencies"
+    assert {"service": "payment-api", "depends_on": "payments-db"} in json.loads(
+        declaration.content
+    )["dependencies"]
     deployments = json.loads(api.requests[0].content)["deployments"]
     # The incident deployment is 45 minutes into the hour; the rollback is still to come.
     assert [(d["version"], d["deployed_at"]) for d in deployments] == [

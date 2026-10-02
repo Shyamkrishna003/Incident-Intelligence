@@ -10,7 +10,7 @@ gives the same anomalies as evaluating it in one pass.
 """
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 
 import structlog
@@ -61,9 +61,15 @@ class DetectionSettings:
 
 @dataclass
 class SeriesOutcome:
+    """What one detection run changed, for the caller to group into incidents."""
+
     evaluated_points: int = 0
-    opened: int = 0
-    closed: int = 0
+    # New anomalies (some may already be closed, if they began and ended within the run).
+    opened: list[Anomaly] = field(default_factory=list)
+    # Anomalies that were already open and are still open, with more abnormal points.
+    extended: list[Anomaly] = field(default_factory=list)
+    # Anomalies that ended during the run.
+    closed: list[Anomaly] = field(default_factory=list)
 
 
 def _episode(row: Anomaly) -> Episode:
@@ -215,6 +221,9 @@ async def _detect_once(
     for episode in [*result.closed, *([result.state.open] if result.state.open else [])]:
         if open_row is not None and episode.started_at == carried_start:
             _apply(open_row, episode)
+            if episode.ended_at is None and open_row not in outcome.extended:
+                outcome.extended.append(open_row)
+            row = open_row
         else:
             row = Anomaly(
                 organization_id=series.organization_id,
@@ -225,9 +234,11 @@ async def _detect_once(
             )
             _apply(row, episode)
             session.add(row)
-            outcome.opened += 1
+            outcome.opened.append(row)
         if episode.ended_at is not None:
-            outcome.closed += 1
+            outcome.closed.append(row)
+            if row in outcome.extended:
+                outcome.extended.remove(row)
         # Flush in order: a closed row must be written before a new open one for the same
         # series, or the "one open anomaly per series" index would reject it.
         await session.flush()

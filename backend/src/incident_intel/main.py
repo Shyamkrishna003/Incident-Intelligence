@@ -20,6 +20,8 @@ from incident_intel.db.migrations import head_revision
 from incident_intel.db.session import create_engine, create_session_factory
 from incident_intel.detection.router import project_router as detection_project_router
 from incident_intel.detection.router import router as detection_router
+from incident_intel.incidents.router import project_router as incidents_project_router
+from incident_intel.incidents.router import router as incidents_router
 from incident_intel.ingestion.router import router as ingestion_router
 from incident_intel.streaming.producer import KafkaPublisher, MessagePublisher
 from incident_intel.streaming.topics import DEPLOYMENTS, LOGS, METRICS, topic_name
@@ -93,4 +95,6 @@ def create_app(
     app.include_router(event_project_router)
     app.include_router(detection_router)
     app.include_router(detection_project_router)
+    app.include_router(incidents_router)
+    app.include_router(incidents_project_router)
     return app

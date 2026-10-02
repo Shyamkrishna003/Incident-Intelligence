@@ -123,6 +123,33 @@ export function useAnomalies(
   });
 }
 
+/** Incidents overlapping the last `rangeMinutes`. */
+export function useIncidents(projectId: string, rangeMinutes: number, onlyOpen: boolean) {
+  const uid = useUid();
+  return useQuery({
+    queryKey: [uid, "incidents", projectId, rangeMinutes, onlyOpen],
+    queryFn: () =>
+      api.listIncidents(projectId, {
+        ...lastMinutes(rangeMinutes),
+        ...(onlyOpen ? { status: "open" as const } : {}),
+      }),
+    select: (data) => data.incidents,
+    staleTime: 0,
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useIncident(projectId: string, incidentId: string) {
+  const uid = useUid();
+  return useQuery({
+    queryKey: [uid, "incident", projectId, incidentId],
+    queryFn: () => api.getIncident(projectId, incidentId),
+    staleTime: 0,
+    refetchInterval: 30_000,
+  });
+}
+
 export function useApiKeys(projectId: string, enabled: boolean) {
   const uid = useUid();
   return useQuery({

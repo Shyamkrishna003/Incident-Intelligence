@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from incident_intel.core.config import RuntimeSettings
 from incident_intel.db.session import create_engine, create_session_factory
+from incident_intel.detection.models import Anomaly
 from incident_intel.detection.service import DetectionSettings, detect_series
+from incident_intel.incidents.service import CorrelationSettings, apply_detection_changes
 from incident_intel.streaming.consumer import (
     ConsumedMessage,
     KafkaMessageSource,
@@ -27,15 +29,26 @@ DETECTION_CONSUMER_GROUP = "detection"
 
 
 def detection_handler(
-    session_factory: async_sessionmaker[AsyncSession], settings: DetectionSettings
+    session_factory: async_sessionmaker[AsyncSession],
+    settings: DetectionSettings,
+    correlation: CorrelationSettings | None = None,
 ) -> MessageHandler:
+    """Detect anomalies for the event's series, then group the changes into incidents.
+
+    Both happen in one transaction, so an anomaly and its incident commit together.
+    """
+    correlation = correlation or CorrelationSettings()
+
     async def handle(message: ConsumedMessage) -> None:
         try:
             event = MetricsStoredEvent.model_validate_json(message.value)
         except ValidationError as exc:
             raise PermanentMessageError("invalid_message", str(exc.error_count())) from exc
 
-        evaluated = opened = closed = 0
+        evaluated = 0
+        opened: list[Anomaly] = []
+        extended: list[Anomaly] = []
+        closed: list[Anomaly] = []
         async with session_factory() as session:
             try:
                 # Sorted so concurrent consumers touch series in the same order.
@@ -45,8 +58,12 @@ def detection_handler(
                     )
                     evaluated += outcome.evaluated_points
                     opened += outcome.opened
+                    extended += outcome.extended
                     closed += outcome.closed
-                # One commit per event: its anomalies and positions land together.
+                await apply_detection_changes(
+                    session, opened=opened, extended=extended, closed=closed, config=correlation
+                )
+                # One commit per event: anomalies, incidents and positions land together.
                 await session.commit()
             except (IntegrityError, DataError) as exc:
                 raise PermanentMessageError("rejected_by_database", str(exc.orig)[:300]) from exc
@@ -57,8 +74,8 @@ def detection_handler(
             project_id=str(event.project_id),
             series=len(event.series_ids),
             evaluated_points=evaluated,
-            anomalies_opened=opened,
-            anomalies_closed=closed,
+            anomalies_opened=len(opened),
+            anomalies_closed=len(closed),
         )
 
     return handle
@@ -80,7 +97,11 @@ async def run_detection_consumer(settings: RuntimeSettings, stop: asyncio.Event)
     try:
         await run_consumer(
             source=source,
-            handler=detection_handler(create_session_factory(engine), detection),
+            handler=detection_handler(
+                create_session_factory(engine),
+                detection,
+                CorrelationSettings.from_settings(settings),
+            ),
             publisher=publisher,
             dlq_topic=topic_name(settings, METRICS_STORED_DLQ),
             stop=stop,

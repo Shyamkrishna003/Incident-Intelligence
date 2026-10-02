@@ -136,12 +136,58 @@ export interface Anomaly {
   baseline_center: number;
   baseline_spread: number;
   point_count: number;
+  incident_id: string | null;
 }
 
 export interface AnomalyList {
   start: string;
   end: string;
   anomalies: Anomaly[];
+}
+
+export interface Incident {
+  id: string;
+  title: string;
+  status: "open" | "resolved" | "merged";
+  /** The worst severity among its anomalies. A rule, not a probability. */
+  severity: AnomalySeverity;
+  started_at: string;
+  detected_at: string;
+  last_activity_at: string;
+  resolved_at: string | null;
+  merged_into_id: string | null;
+  services: string[];
+  anomaly_count: number;
+  open_anomaly_count: number;
+}
+
+export interface IncidentList {
+  start: string;
+  end: string;
+  incidents: Incident[];
+}
+
+/** A deployment linked as a candidate for "what changed". Not a confirmed cause. */
+export interface CandidateDeployment extends Deployment {
+  timing: "before" | "during";
+}
+
+export interface TimelineEvent {
+  ts: string;
+  kind: string;
+  details: Record<string, unknown>;
+}
+
+export interface Dependency {
+  service: string;
+  depends_on: string;
+}
+
+export interface IncidentDetail extends Incident {
+  anomalies: Anomaly[];
+  candidate_deployments: CandidateDeployment[];
+  timeline: TimelineEvent[];
+  dependencies: Dependency[];
 }
 
 export type ApiKeyScope = "ingest:write" | "telemetry:read";

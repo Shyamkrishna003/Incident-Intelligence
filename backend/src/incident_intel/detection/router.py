@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from incident_intel.api.deps import require_project_role, require_scope
 from incident_intel.core.errors import InvalidInputError
 from incident_intel.db.session import get_session
-from incident_intel.detection.queries import StatusFilter, list_anomalies
+from incident_intel.detection.queries import AnomalyRow, StatusFilter, list_anomalies
 from incident_intel.telemetry.messages import NAME_PATTERN
 from incident_intel.tenancy.access import ProjectAccess
 from incident_intel.tenancy.api_keys import ApiKeyScope
@@ -50,6 +50,8 @@ class AnomalyOut(BaseModel):
     baseline_center: float
     baseline_spread: float
     point_count: int
+    # The incident this anomaly was grouped into, if any.
+    incident_id: uuid.UUID | None
 
 
 class AnomalyListResponse(BaseModel):
@@ -57,6 +59,32 @@ class AnomalyListResponse(BaseModel):
     end: datetime
     # Open anomalies first, then newest first.
     anomalies: list[AnomalyOut]
+
+
+def anomaly_out(row: AnomalyRow) -> AnomalyOut:
+    return AnomalyOut(
+        id=row.anomaly.id,
+        service=row.service_name,
+        metric=row.series.name,
+        attributes=row.series.attributes,
+        unit=row.series.unit,
+        detector=row.anomaly.detector,
+        status=row.anomaly.status,
+        severity=row.anomaly.severity,
+        direction=row.anomaly.direction,
+        started_at=row.anomaly.started_at,
+        detected_at=row.anomaly.detected_at,
+        last_anomalous_at=row.anomaly.last_anomalous_at,
+        ended_at=row.anomaly.ended_at,
+        closed_reason=row.anomaly.closed_reason,
+        peak_value=row.anomaly.peak_value,
+        peak_at=row.anomaly.peak_at,
+        peak_score=row.anomaly.peak_score,
+        baseline_center=row.anomaly.baseline_center,
+        baseline_spread=row.anomaly.baseline_spread,
+        point_count=row.anomaly.point_count,
+        incident_id=row.anomaly.incident_id,
+    )
 
 
 ReadContext = Annotated[TenantContext, Depends(require_scope(ApiKeyScope.TELEMETRY_READ))]
@@ -97,35 +125,7 @@ async def _anomalies(
         metric_name=metric,
         limit=limit,
     )
-    return AnomalyListResponse(
-        start=start,
-        end=end,
-        anomalies=[
-            AnomalyOut(
-                id=row.anomaly.id,
-                service=row.service_name,
-                metric=row.series.name,
-                attributes=row.series.attributes,
-                unit=row.series.unit,
-                detector=row.anomaly.detector,
-                status=row.anomaly.status,
-                severity=row.anomaly.severity,
-                direction=row.anomaly.direction,
-                started_at=row.anomaly.started_at,
-                detected_at=row.anomaly.detected_at,
-                last_anomalous_at=row.anomaly.last_anomalous_at,
-                ended_at=row.anomaly.ended_at,
-                closed_reason=row.anomaly.closed_reason,
-                peak_value=row.anomaly.peak_value,
-                peak_at=row.anomaly.peak_at,
-                peak_score=row.anomaly.peak_score,
-                baseline_center=row.anomaly.baseline_center,
-                baseline_spread=row.anomaly.baseline_spread,
-                point_count=row.anomaly.point_count,
-            )
-            for row in rows
-        ],
-    )
+    return AnomalyListResponse(start=start, end=end, anomalies=[anomaly_out(row) for row in rows])
 
 
 @router.get("/anomalies", response_model=AnomalyListResponse)

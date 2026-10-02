@@ -27,6 +27,15 @@ export function formatValue(value: number, unit: string | null): string {
   return unit ? `${formatNumber(value)} ${unit}` : formatNumber(value);
 }
 
+/** "30 s", "13 min", "2 h 5 min": how long something lasted. */
+export function formatDuration(startIso: string, endMs: number): string {
+  const seconds = Math.max(0, Math.round((endMs - Date.parse(startIso)) / 1000));
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
 /** "region=eu, host=a" for a series' attributes; "all" when it has none. */
 export function seriesLabel(attributes: Record<string, string>): string {
   const entries = Object.entries(attributes).sort(([a], [b]) => a.localeCompare(b));

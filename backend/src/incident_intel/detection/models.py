@@ -35,6 +35,13 @@ class Anomaly(CreatedAtMixin, Base):
             ["metric_series.project_id", "metric_series.id"],
             ondelete="RESTRICT",
         ),
+        # Composite, so an anomaly can only belong to an incident of its own project.
+        ForeignKeyConstraint(
+            ["project_id", "incident_id"],
+            ["incidents.project_id", "incidents.id"],
+            ondelete="RESTRICT",
+        ),
+        Index("ix_anomalies_incident_id", "incident_id"),
         CheckConstraint("status IN ('open', 'closed')", name="status_valid"),
         CheckConstraint("direction IN ('above', 'below')", name="direction_valid"),
         CheckConstraint("severity IN ('low', 'medium', 'high', 'critical')", name="severity_valid"),
@@ -75,6 +82,8 @@ class Anomaly(CreatedAtMixin, Base):
     baseline_center: Mapped[float] = mapped_column(Double)
     baseline_spread: Mapped[float] = mapped_column(Double)
     point_count: Mapped[int] = mapped_column(Integer)
+    # The incident this anomaly was grouped into (null for anomalies from before grouping).
+    incident_id: Mapped[uuid.UUID | None]
 
 
 class DetectionState(Base):

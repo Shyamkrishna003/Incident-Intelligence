@@ -31,6 +31,7 @@ function anomaly(overrides: Partial<Anomaly>): Anomaly {
     baseline_center: 120,
     baseline_spread: 6,
     point_count: 56,
+    incident_id: null,
     ...overrides,
   };
 }

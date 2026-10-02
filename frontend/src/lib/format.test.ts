@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { pivotSeries } from "./chart";
-import { seriesLabel, slugify } from "./format";
+import { formatDuration, seriesLabel, slugify } from "./format";
 import { roleAtLeast } from "./types";
 
 describe("slugify", () => {
@@ -53,5 +53,18 @@ describe("pivotSeries", () => {
       { t: Date.parse("2026-10-02T10:00:00Z"), s0: 1 },
       { t: Date.parse("2026-10-02T10:00:10Z"), s0: 2, s1: 9 },
     ]);
+  });
+});
+
+describe("formatDuration", () => {
+  it.each([
+    [15_000, "15 s"],
+    [59_400, "59 s"],
+    [5 * 60_000, "5 min"],
+    [125 * 60_000, "2 h 5 min"],
+    [-5_000, "0 s"],
+  ])("%d ms -> %s", (elapsed, expected) => {
+    const start = "2026-10-03T10:00:00Z";
+    expect(formatDuration(start, Date.parse(start) + elapsed)).toBe(expected);
   });
 });

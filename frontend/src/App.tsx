@@ -11,6 +11,8 @@ import type { Me } from "./lib/types";
 import { AnomaliesPage } from "./pages/AnomaliesPage";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
 import { DeploymentsPage } from "./pages/DeploymentsPage";
+import { IncidentPage } from "./pages/IncidentPage";
+import { IncidentsPage } from "./pages/IncidentsPage";
 import { OnboardingPage } from "./pages/OnboardingPage";
 import { ServicesPage } from "./pages/ServicesPage";
 import { SignInPage } from "./pages/SignInPage";
@@ -101,7 +103,7 @@ function SignedIn({ account }: { account: Account }) {
         path="/"
         element={
           firstProject ? (
-            <Navigate to={`/p/${firstProject.id}/services`} replace />
+            <Navigate to={`/p/${firstProject.id}/incidents`} replace />
           ) : (
             <OnboardingPage me={me.data} account={account} />
           )
@@ -121,6 +123,8 @@ function ProjectRoutes({ me, account }: { me: Me; account: Account }) {
   return (
     <AppShell me={me} account={account} current={current}>
       <Routes>
+        <Route path="incidents" element={<IncidentsPage current={current} />} />
+        <Route path="incidents/:incidentId" element={<IncidentPage current={current} />} />
         <Route path="services" element={<ServicesPage current={current} />} />
         <Route
           path="services/:service"
@@ -133,7 +137,7 @@ function ProjectRoutes({ me, account }: { me: Me; account: Account }) {
         <Route path="anomalies" element={<AnomaliesPage current={current} />} />
         <Route path="deployments" element={<DeploymentsPage current={current} />} />
         <Route path="api-keys" element={<ApiKeysPage current={current} />} />
-        <Route path="*" element={<Navigate to="services" replace />} />
+        <Route path="*" element={<Navigate to="incidents" replace />} />
       </Routes>
     </AppShell>
   );

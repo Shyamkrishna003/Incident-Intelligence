@@ -60,6 +60,14 @@ METRICS: tuple[MetricSpec, ...] = (
 )
 
 
+# Declared service dependencies: (service, the service it depends on).
+DEPENDENCIES: tuple[tuple[str, str], ...] = (
+    ("checkout-web", "payment-api"),
+    ("checkout-web", "inventory-api"),
+    ("payment-api", "payments-db"),
+)
+
+
 @dataclass
 class Telemetry:
     """Request bodies for the three ingestion endpoints."""

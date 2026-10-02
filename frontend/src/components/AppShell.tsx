@@ -63,7 +63,10 @@ export function AppShell({
             </select>
           </label>
 
-          <nav aria-label="Project" className="flex gap-1">
+          <nav aria-label="Project" className="flex flex-wrap gap-1">
+            <NavLink to={`${base}/incidents`} className={navClass}>
+              Incidents
+            </NavLink>
             <NavLink to={`${base}/services`} className={navClass}>
               Services
             </NavLink>

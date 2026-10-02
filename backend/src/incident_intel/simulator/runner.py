@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 
 from incident_intel.simulator.client import IngestClient, SendSummary
-from incident_intel.simulator.scenario import align, generate
+from incident_intel.simulator.scenario import DEPENDENCIES, align, generate
 
 logger = structlog.get_logger(__name__)
 
@@ -46,6 +46,7 @@ async def run_simulation(
         live=plan.live,
     )
 
+    await client.declare_dependencies(DEPENDENCIES)
     summary = await client.send(
         generate(start=start, end=end, step=plan.step, incident_at=incident_at, seed=plan.seed)
     )

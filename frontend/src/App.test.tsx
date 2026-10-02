@@ -24,12 +24,12 @@ describe("Root", () => {
     ).toBeInTheDocument();
   });
 
-  it("opens the first project's services for a returning user", async () => {
+  it("opens the first project's incidents for a returning user", async () => {
     vi.spyOn(api, "me").mockResolvedValue(meWith("viewer"));
-    vi.spyOn(api, "listServices").mockResolvedValue({ services: [] });
+    vi.spyOn(api, "listIncidents").mockResolvedValue({ start: "", end: "", incidents: [] });
     renderApp(<Root />);
 
-    expect(await screen.findByRole("heading", { name: "Services" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Incidents" })).toBeInTheDocument();
     // A viewer gets no API-keys navigation.
     expect(screen.queryByRole("link", { name: "API keys" })).not.toBeInTheDocument();
   });

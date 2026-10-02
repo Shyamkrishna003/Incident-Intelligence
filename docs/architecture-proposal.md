@@ -683,3 +683,34 @@ Verified:
 - in a real browser against the emulator: the Anomalies page lists the seven with their evidence; the latency chart is shaded from the deployment marker onward; the control service's chart has no shading; no failed requests or page errors
 
 Evaluation results at implementation (synthetic scenarios only): robust z-score 10/11 problems found with 0 false positives; static 2× rule 9/11; EWMA 8/11. The default misses the gradual drift.
+
+---
+
+## 20. Slice 6 (incidents): implementation record
+
+The *Correlate* stage: related anomalies become one incident, with an explainable timeline.
+
+- **`incidents/rules.py`:** the pure grouping rules.
+- **`incidents/service.py`:** applies them against PostgreSQL inside the detection transaction; records the timeline; links candidate deployments; resolves, reopens and merges.
+- **`incidents/dependencies.py`:** declared service dependencies (replace-all, written directly to PostgreSQL).
+- **Migration `0006`:** `incidents`, `incident_events`, `incident_deployments`, `service_dependencies`, and `anomalies.incident_id`.
+- **API and web app:** incident list and detail; dependency endpoints.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Grouping runs in the detection consumer's transaction | An anomaly and its place in an incident commit together, and detection's idempotency (the per-series position) covers grouping too. |
+| Rule: within 15 minutes, and same service or one direct dependency | As planned in §6. Explainable, and narrow enough not to merge unrelated problems that happen to coincide. |
+| Incidents merge when one anomaly relates to two | Anomalies don't arrive in dependency order. Without merging, a problem whose middle service is detected last would stay split in two. |
+| A resolved incident can be reopened for one window | A problem that recovers briefly and returns is one incident, not two. |
+| Candidate deployments are limited to services already in the incident | The scenario's unrelated deployment must not be linked. The link is recorded as a candidate with the rule that linked it. |
+| Statuses are `open`, `resolved`, `merged` only | These are what the system can determine by itself. Human workflow states (acknowledged, false positive) belong with feedback. |
+| Timeline entries carry a sequence number | Several anomalies are detected in the same instant; ordering by time alone showed the reasons out of order. Found on the Docker run. |
+| Dependencies are declared, not inferred | Inference needs traces, which aren't ingested yet. Declaring is replace-all so it is idempotent. |
+| The incident page has a "Not yet known" section | CLAUDE.md: distinguish observed facts, hypotheses and unknowns. Grouping establishes neither cause nor direction. |
+| The landing page is now Incidents | The product is incident-centred. |
+
+Verified:
+- on the Docker stack, with the simulator: the seven anomalies became one incident across three services; the only candidate deployment is `payment-api 2.43.0`; the unrelated `inventory-api` deployment is not linked; the timeline gives the rule for each anomaly, in order
+- in a real browser against the emulator: the incident list and detail page on desktop and at 390px, light and dark, with no horizontal overflow, failed requests or page errors

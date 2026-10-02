@@ -51,6 +51,18 @@ class IngestClient:
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
 
+    async def declare_dependencies(self, edges: Sequence[tuple[str, str]]) -> None:
+        """Tell the platform which simulated services call which."""
+        body = {"dependencies": [{"service": a, "depends_on": b} for a, b in edges]}
+        try:
+            response = await self._http.put("/v1/dependencies", json=body)
+        except httpx.TransportError as exc:
+            raise SimulatorError(f"could not reach the API: {exc}") from exc
+        if response.status_code != 200:
+            raise SimulatorError(
+                f"/v1/dependencies answered {response.status_code}: {response.text[:300]}"
+            )
+
     async def send(self, telemetry: Telemetry) -> SendSummary:
         summary = SendSummary()
         for path, field_name, batch_size in _ENDPOINTS:
