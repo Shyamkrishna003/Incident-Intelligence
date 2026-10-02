@@ -30,6 +30,9 @@ from incident_intel.core.config import (
 from incident_intel.core.errors import AppError
 from incident_intel.core.logging import configure_logging
 from incident_intel.db.session import create_engine, create_session_factory
+from incident_intel.detection.consumer import run_detection_consumer
+from incident_intel.detection.evaluation import candidates, evaluate, format_report
+from incident_intel.detection.service import DetectionSettings
 from incident_intel.simulator.client import IngestClient, SimulatorError, build_http_client
 from incident_intel.simulator.runner import SimulationPlan, run_simulation
 from incident_intel.streaming.admin import ensure_topics, read_topic_from_start
@@ -92,7 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
     kafka_commands.add_parser("init", help="Create missing topics (existing ones are unchanged)")
 
     consume = commands.add_parser("consume", help="Run a long-lived consumer until SIGTERM")
-    consume.add_argument("consumer", choices=["storage"])
+    consume.add_argument("consumer", choices=["storage", "detection"])
+
+    evaluation = commands.add_parser("eval", help="Score detectors on labelled scenarios")
+    evaluation.add_argument("suite", choices=["detection"])
 
     dlq = commands.add_parser("dlq", help="Inspect dead-lettered messages")
     dlq_commands = dlq.add_subparsers(dest="dlq_command", required=True)
@@ -227,12 +233,28 @@ def _kafka_init(settings: RuntimeSettings) -> None:
         print(f"{name}\t{status}", file=sys.stderr)
 
 
-async def _consume(settings: RuntimeSettings) -> None:
+async def _consume(settings: RuntimeSettings, consumer: str) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(signum, stop.set)
-    await run_storage_consumer(settings, stop)
+    if consumer == "detection":
+        await run_detection_consumer(settings, stop)
+    else:
+        await run_storage_consumer(settings, stop)
+
+
+def _eval_detection(settings: RuntimeSettings) -> None:
+    """Compare the candidate detectors, using the configured threshold and engine."""
+    detection = DetectionSettings.from_settings(settings)
+    factories = candidates(settings.detection_threshold, settings.detection_min_history)
+    reports = [evaluate(name, factory, detection.engine) for name, factory in factories.items()]
+    print(
+        f"Detection evaluation on synthetic labelled scenarios "
+        f"(threshold {settings.detection_threshold}, "
+        f"{settings.detection_min_consecutive} points in a row to open).\n"
+    )
+    print(format_report(reports))
 
 
 def _dlq_inspect(args: argparse.Namespace, settings: RuntimeSettings) -> None:
@@ -291,7 +313,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "kafka":
             _kafka_init(settings)
         elif args.command == "consume":
-            asyncio.run(_consume(settings))
+            asyncio.run(_consume(settings, args.consumer))
+        elif args.command == "eval":
+            _eval_detection(settings)
         elif args.command == "dlq":
             _dlq_inspect(args, settings)
         elif args.command == "simulate":

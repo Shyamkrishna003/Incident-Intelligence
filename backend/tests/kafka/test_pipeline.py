@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from incident_intel.core.config import Settings
 from incident_intel.db.session import get_session
+from incident_intel.detection.consumer import detection_handler
+from incident_intel.detection.service import DetectionSettings
 from incident_intel.main import create_app
 from incident_intel.streaming.admin import delete_topics, ensure_topics, read_topic_from_start
 from incident_intel.streaming.consumer import ConsumedMessage, KafkaMessageSource, run_consumer
@@ -28,6 +30,8 @@ from incident_intel.streaming.topics import (
     LOGS_DLQ,
     METRICS,
     METRICS_DLQ,
+    METRICS_STORED,
+    METRICS_STORED_DLQ,
     topic_name,
 )
 from incident_intel.telemetry.consumer import dead_letter_topics, storage_handler
@@ -96,7 +100,7 @@ async def _consume(
     were handled."""
     stop = asyncio.Event()
     handled = 0
-    store = storage_handler(settings, session_factory)
+    store = storage_handler(settings, session_factory, publisher)
     dead_letters = dead_letter_topics(settings)
 
     async def handler(message: ConsumedMessage) -> None:
@@ -283,3 +287,74 @@ async def test_logs_and_deployments_flow_through_their_own_topics(
     )
     assert dead.headers["dlq.reason"] == "invalid_message"
     assert dead.headers["dlq.source"].startswith(f"{logs_topic}/")
+
+
+async def test_an_incident_is_detected_end_to_end(
+    kafka_settings: Settings,
+    kafka_client: AsyncClient,
+    kafka_publisher: KafkaPublisher,
+    session_factory: async_sessionmaker[AsyncSession],
+    make_tenant: TenantFactory,
+) -> None:
+    """HTTP ingest → Kafka → storage → "metrics stored" event → detection → anomalies API."""
+    tenant = await make_tenant()
+    now = datetime.now(UTC).replace(microsecond=0)
+    values = [100.0, 101.0, 99.0, 100.5, 99.5] * 8 + [900.0] * 4  # healthy, then a jump
+    points = [
+        {
+            "service": "payment-api",
+            "metric": "latency",
+            "unit": "ms",
+            "timestamp": (now - timedelta(seconds=15 * (len(values) - i))).isoformat(),
+            "value": value,
+        }
+        for i, value in enumerate(values)
+    ]
+    accepted = await kafka_client.post(
+        "/v1/ingest/metrics",
+        json={"points": points},
+        headers={**tenant.auth_headers, "Idempotency-Key": "incident"},
+    )
+    assert accepted.status_code == 202
+
+    await _consume(kafka_settings, session_factory, kafka_publisher, expected=1)
+
+    # The storage consumer announced the batch; run the real detection handler on it.
+    stop = asyncio.Event()
+    detect = detection_handler(session_factory, DetectionSettings.from_settings(kafka_settings))
+
+    async def handler(message: ConsumedMessage) -> None:
+        try:
+            await detect(message)
+        finally:
+            stop.set()
+
+    source = KafkaMessageSource(
+        kafka_settings,
+        group_id=f"test-{uuid.uuid4().hex}",
+        topics=[topic_name(kafka_settings, METRICS_STORED)],
+    )
+    try:
+        await asyncio.wait_for(
+            run_consumer(
+                source=source,
+                handler=handler,
+                publisher=kafka_publisher,
+                dlq_topic=topic_name(kafka_settings, METRICS_STORED_DLQ),
+                stop=stop,
+                poll_timeout_seconds=0.5,
+            ),
+            timeout=60,
+        )
+    finally:
+        await source.close()
+
+    response = await kafka_client.get("/v1/anomalies", headers=tenant.auth_headers)
+    [anomaly] = response.json()["anomalies"]
+    assert (anomaly["service"], anomaly["metric"], anomaly["status"]) == (
+        "payment-api",
+        "latency",
+        "open",
+    )
+    assert anomaly["peak_value"] == 900.0
+    assert anomaly["direction"] == "above"

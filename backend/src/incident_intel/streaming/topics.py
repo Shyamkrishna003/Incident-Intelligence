@@ -27,13 +27,22 @@ LOGS = TopicSpec("telemetry.logs.v1", partitions=6, retention_ms=3 * _DAY_MS)
 # Low volume, and consumers will care about order across services: one partition.
 DEPLOYMENTS = TopicSpec("telemetry.deployments.v1", partitions=1, retention_ms=7 * _DAY_MS)
 
+# "New metric points are stored for these series", published by the storage consumer.
+# Detection reads it, so detection only ever runs on data that is already in PostgreSQL.
+METRICS_STORED = TopicSpec("telemetry.metrics.stored.v1", partitions=6, retention_ms=3 * _DAY_MS)
+
 METRICS_DLQ = _dead_letter(METRICS)
 LOGS_DLQ = _dead_letter(LOGS)
 DEPLOYMENTS_DLQ = _dead_letter(DEPLOYMENTS)
+METRICS_STORED_DLQ = _dead_letter(METRICS_STORED)
 
 # Each telemetry topic with its dead-letter topic.
 TELEMETRY_TOPICS = ((METRICS, METRICS_DLQ), (LOGS, LOGS_DLQ), (DEPLOYMENTS, DEPLOYMENTS_DLQ))
-ALL_TOPICS = tuple(spec for pair in TELEMETRY_TOPICS for spec in pair)
+ALL_TOPICS = (
+    *(spec for pair in TELEMETRY_TOPICS for spec in pair),
+    METRICS_STORED,
+    METRICS_STORED_DLQ,
+)
 
 
 def topic_name(settings: RuntimeSettings, spec: TopicSpec) -> str:

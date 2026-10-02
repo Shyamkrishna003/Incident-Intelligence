@@ -127,6 +127,22 @@ class DeploymentBatchMessage(BatchEnvelope):
     deployments: list[DeploymentMessage] = Field(min_length=1)
 
 
+class MetricsStoredEvent(BaseModel):
+    """Published after a metric batch is stored: "these series have new points".
+
+    Carries ids only. Consumers read the points themselves from PostgreSQL, so the event
+    can be delivered more than once, or late, without harm.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    schema_version: Literal[1] = 1
+    organization_id: uuid.UUID
+    project_id: uuid.UUID
+    batch_id: uuid.UUID
+    series_ids: list[uuid.UUID]
+
+
 def content_hash(items: Sequence[BaseModel]) -> str:
     """Fingerprint of a batch's normalized items."""
     return hashlib.sha256(

@@ -98,6 +98,31 @@ export function useDeployments(projectId: string, rangeMinutes: number, service?
   });
 }
 
+/** Anomalies overlapping the last `rangeMinutes`. */
+export function useAnomalies(
+  projectId: string,
+  rangeMinutes: number,
+  filter: { status?: "open" | "closed"; service?: string; metric?: string | null } = {},
+) {
+  const uid = useUid();
+  const { status, service, metric } = filter;
+  return useQuery({
+    queryKey: [uid, "anomalies", projectId, rangeMinutes, status ?? null, service ?? null, metric ?? null],
+    queryFn: () =>
+      api.listAnomalies(projectId, {
+        ...lastMinutes(rangeMinutes),
+        ...(status ? { status } : {}),
+        ...(service ? { service } : {}),
+        ...(metric ? { metric } : {}),
+      }),
+    select: (data) => data.anomalies,
+    enabled: metric !== null,
+    staleTime: 0,
+    refetchInterval: 30_000,
+    placeholderData: keepPreviousData,
+  });
+}
+
 export function useApiKeys(projectId: string, enabled: boolean) {
   const uid = useUid();
   return useQuery({

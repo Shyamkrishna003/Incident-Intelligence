@@ -647,3 +647,39 @@ Verified:
 - in a real browser against the emulator: the service page shows the latency rise starting at the 2.43.0 deployment marker with the error logs beneath it; the deployments page lists the cause and the red herring; a 390px layout has no horizontal overflow; no failed requests or page errors
 
 A mistake during verification, recorded so it isn't repeated: the first browser run reached a dev server already running on port 5173 that was configured for the real Firebase project, and attempted a sign-up there. Test runs now use their own ports and refuse to start unless the served app is in emulator mode.
+
+---
+
+## 19. Slice 5 (anomaly detection): implementation record
+
+The *Detect* stage: the system now notices abnormal metric behaviour by itself.
+
+- **`detection/detectors.py`:** pure detectors (robust z-score, EWMA, static threshold).
+- **`detection/engine.py`:** pure logic turning point-by-point judgments into anomalies that open, extend and close.
+- **`detection/service.py`:** rebuilds the engine's state from PostgreSQL, runs it on the points stored since the last evaluation, and writes the result.
+- **`detection/consumer.py`:** runs the service for each "metrics stored" event (consumer group `detection`).
+- **`detection/evaluation.py`:** labelled synthetic scenarios and scoring, behind `ii eval detection`.
+- **Migration `0005`:** `anomalies` and `detection_state`.
+- **API and web app:** anomalies list, chart shading.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Detection consumes a "metrics stored" event, not the raw metrics topic (a change from §6) | Reading the raw stream, detection could run before the storage consumer had written the data it needs (history, and the series row an anomaly points to). The event is published after the storage commit, and also for a redelivered batch, so detection always sees stored data and no batch goes unannounced. |
+| Detector state lives in PostgreSQL, not Redis (a change from §6) | The baseline window is one indexed query per series per event. No measured need for Redis yet, and one store keeps detection deterministic and testable. Revisit if the query cost shows up. |
+| The engine's state is defined so it can be rebuilt from stored rows | Evaluating a series in many small steps must give the same anomalies as one pass. A test asserts this equivalence on four scenarios. |
+| A per-series "evaluated through" position | Makes detection idempotent under redelivery. The cost is that late points are not evaluated. |
+| The baseline excludes points inside anomalies, and is frozen while one is open | Otherwise a sustained problem contaminates the baseline and the anomaly "ends" while things are still broken. |
+| An anomaly open for 6 hours closes as "persisted" and the baseline restarts | A level that never returns is eventually the new normal. Without this a legitimate permanent change would stay flagged forever. |
+| Two anomalous points in a row to open | Single-point glitches are common and not actionable. It costs one sampling interval of detection delay. |
+| Default: robust z-score at threshold 6 | Chosen from the evaluation: the best recall of the candidates with no false positives. Threshold 4 raised a false alarm on the slow wave. |
+| Severity is a rule on the score; the API and UI say it is not a probability | CLAUDE.md: no calibrated-looking confidence without calibration. The PRD's `confidence = 0.94` is not reproduced. |
+| The static threshold exists only in the evaluation | It is the simple-rule baseline the statistical detectors must beat. User-configured thresholds need a rules model and UI, deferred. |
+| One Kafka partition per project serializes a project's detection | Events are keyed by project, so two consumers never evaluate the same series at once. A partial unique index (one open anomaly per series and detector) is the backstop. |
+
+Verified:
+- on the Docker stack, with the simulator: all 7 degrading series were flagged within 30 seconds of the 2.43.0 deployment (the downstream service about 2 minutes later, as designed), the healthy control service was not flagged, and re-running the simulator created no duplicate anomalies
+- in a real browser against the emulator: the Anomalies page lists the seven with their evidence; the latency chart is shaded from the deployment marker onward; the control service's chart has no shading; no failed requests or page errors
+
+Evaluation results at implementation (synthetic scenarios only): robust z-score 10/11 problems found with 0 false positives; static 2× rule 9/11; EWMA 8/11. The default misses the gradual drift.

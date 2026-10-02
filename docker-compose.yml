@@ -134,6 +134,21 @@ services:
       kafka-init:
         condition: service_completed_successfully
 
+  # "Metrics stored" events → anomalies. Reads the points from PostgreSQL, so it only ever
+  # evaluates data that is already stored.
+  detection-consumer:
+    build: ./backend
+    command: ["ii", "consume", "detection"]
+    environment: *backend-env
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+
   # Optional: local stand-in for Firebase Authentication (`make emulator`). Started only
   # with the "emulator" profile, so `make up` does not need this large image.
   firebase-emulator:

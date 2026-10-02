@@ -3,6 +3,7 @@
 import type {
   ApiKey,
   ApiKeyCreated,
+  AnomalyList,
   ApiKeyScope,
   DeploymentList,
   LogList,
@@ -180,6 +181,20 @@ export const api = {
     return request<DeploymentList>(
       `/v1/projects/${seg(projectId)}/deployments?${query.toString()}`,
     );
+  },
+
+  listAnomalies: (
+    projectId: string,
+    filter: { start: Date; end: Date; status?: "open" | "closed"; service?: string; metric?: string },
+  ) => {
+    const query = new URLSearchParams({
+      start: filter.start.toISOString(),
+      end: filter.end.toISOString(),
+    });
+    if (filter.status) query.set("status", filter.status);
+    if (filter.service) query.set("service", filter.service);
+    if (filter.metric) query.set("metric", filter.metric);
+    return request<AnomalyList>(`/v1/projects/${seg(projectId)}/anomalies?${query.toString()}`);
   },
 
   listApiKeys: (projectId: string) =>

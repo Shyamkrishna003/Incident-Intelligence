@@ -110,6 +110,40 @@ export interface DeploymentList {
   deployments: Deployment[];
 }
 
+export type AnomalySeverity = "low" | "medium" | "high" | "critical";
+
+export interface Anomaly {
+  id: string;
+  service: string;
+  metric: string;
+  attributes: Record<string, string>;
+  unit: string | null;
+  detector: string;
+  status: "open" | "closed";
+  /** A documented rule on the score, not a probability. */
+  severity: AnomalySeverity;
+  direction: "above" | "below";
+  started_at: string;
+  detected_at: string;
+  last_anomalous_at: string;
+  ended_at: string | null;
+  closed_reason: "recovered" | "persisted" | null;
+  peak_value: number;
+  peak_at: string;
+  /** Distance from normal in units of the baseline's spread. Not a probability. */
+  peak_score: number;
+  /** What "normal" was when the anomaly opened. */
+  baseline_center: number;
+  baseline_spread: number;
+  point_count: number;
+}
+
+export interface AnomalyList {
+  start: string;
+  end: string;
+  anomalies: Anomaly[];
+}
+
 export type ApiKeyScope = "ingest:write" | "telemetry:read";
 
 export interface ApiKey {

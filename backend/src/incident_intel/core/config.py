@@ -50,6 +50,22 @@ class RuntimeSettings(DatabaseSettings):
     # Largest single Kafka message we produce or accept (a full ingestion batch).
     kafka_max_message_bytes: int = Field(default=2 * _MIB, ge=_MIB)
 
+    # Anomaly detection. The defaults were chosen with `ii eval detection`; change them
+    # only together with a new evaluation run.
+    detection_detector: Literal["robust_zscore", "ewma"] = "robust_zscore"
+    # How many "typical spreads" from normal a value must be to count as anomalous.
+    detection_threshold: float = Field(default=6.0, gt=0)
+    # Normal points needed before a series is judged at all.
+    detection_min_history: int = Field(default=30, ge=5)
+    # How many recent normal points form the baseline.
+    detection_window: int = Field(default=120, ge=10)
+    # Anomalous points in a row needed to open an anomaly.
+    detection_min_consecutive: int = Field(default=2, ge=1)
+    # A normal point this long after the last anomalous one closes the anomaly.
+    detection_close_after_seconds: int = Field(default=120, ge=0)
+    # An anomaly open this long is closed and its level accepted as the new normal.
+    detection_max_open_seconds: int = Field(default=6 * 3600, ge=60)
+
 
 class Settings(RuntimeSettings):
     # Server-side secret mixed into API-key hashes. Rotating it invalidates all keys.

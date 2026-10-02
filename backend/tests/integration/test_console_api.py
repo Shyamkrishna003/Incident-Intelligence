@@ -329,6 +329,7 @@ async def test_another_organizations_resources_are_not_found(
             f"{project}/services/payment-api/metrics/latency", headers=outsider.headers
         ),
         await client.get(f"{project}/services/payment-api/metrics", headers=outsider.headers),
+        await client.get(f"{project}/anomalies", headers=outsider.headers),
         await client.get(f"{project}/api-keys", headers=outsider.headers),
         await client.post(f"{project}/api-keys", json={"name": "x"}, headers=outsider.headers),
         await client.delete(f"{project}/api-keys/abcdefghijkl", headers=outsider.headers),
@@ -339,7 +340,7 @@ async def test_another_organizations_resources_are_not_found(
         ),
     ]
 
-    assert [r.status_code for r in responses] == [404] * 7
+    assert [r.status_code for r in responses] == [404] * 8
     # Indistinguishable from a project that does not exist at all.
     missing = await client.get(f"/v1/projects/{uuid.uuid4()}/services", headers=outsider.headers)
     assert missing.status_code == 404

@@ -81,6 +81,42 @@ describe("MetricChart", () => {
     expect(caption).not.toHaveTextContent("1.0.0");
   });
 
+  it("describes the anomaly periods it shades", () => {
+    render(
+      <MetricChart
+        data={range([series("eu", [1, 2])])}
+        stale={false}
+        anomalies={[
+          {
+            id: "a1",
+            service: "payment-api",
+            metric: "latency",
+            attributes: {},
+            unit: "ms",
+            detector: "robust_zscore",
+            status: "open",
+            severity: "high",
+            direction: "above",
+            started_at: "2026-10-02T10:20:00Z",
+            detected_at: "2026-10-02T10:20:15Z",
+            last_anomalous_at: "2026-10-02T10:40:00Z",
+            ended_at: null,
+            closed_reason: null,
+            peak_value: 900,
+            peak_at: "2026-10-02T10:40:00Z",
+            peak_score: 40,
+            baseline_center: 100,
+            baseline_spread: 5,
+            point_count: 80,
+          },
+        ]}
+      />,
+    );
+
+    const caption = screen.getByText(/Shaded: anomaly detected/);
+    expect(caption).toHaveTextContent("now (ongoing), high");
+  });
+
   it("is honest about series and points it is not showing", () => {
     const many = Array.from({ length: 10 }, (_, index) => series(`r${index}`, [index]));
     render(<MetricChart data={range(many, true)} stale={false} />);

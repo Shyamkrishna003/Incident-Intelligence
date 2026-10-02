@@ -1,7 +1,7 @@
 """Idempotent persistence of metric batches (used by the storage consumer)."""
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from sqlalchemy import insert, select, tuple_, update
@@ -35,6 +35,9 @@ class StoreOutcome(StrEnum):
 class StoreResult:
     outcome: StoreOutcome
     stored_points: int
+    # Metric batches only: every series the batch touched, whether or not this delivery
+    # stored anything. Detection is told about them (see telemetry.consumer).
+    series_ids: tuple[uuid.UUID, ...] = ()
 
 
 class IdempotencyConflictError(Exception):
@@ -103,11 +106,39 @@ async def store_metric_batch(session: AsyncSession, batch: MetricBatchMessage) -
     exists, another delivery of this batch was stored and nothing else is written.
     """
     if not await _claim_batch(session, batch, kind="metrics", count=len(batch.points)):
-        return _DUPLICATE
+        return replace(_DUPLICATE, series_ids=await _find_series(session, batch))
     service_ids = await _upsert_services(session, batch, {point.service for point in batch.points})
     series_ids = await _upsert_series(session, batch, service_ids)
     stored = await _insert_points(session, batch, service_ids, series_ids)
-    return await _finish_batch(session, batch, stored)
+    result = await _finish_batch(session, batch, stored)
+    return replace(result, series_ids=tuple(sorted(series_ids.values(), key=str)))
+
+
+async def _find_series(session: AsyncSession, batch: MetricBatchMessage) -> tuple[uuid.UUID, ...]:
+    """The series an already stored batch belongs to (for a redelivered batch)."""
+    names = sorted({point.service for point in batch.points})
+    services = await session.execute(
+        select(Service.name, Service.id).where(
+            Service.project_id == batch.project_id, Service.name.in_(names)
+        )
+    )
+    service_ids = {name: service_id for name, service_id in services}
+    keys = {
+        (service_ids[point.service], point.metric, attributes_hash(point.attributes))
+        for point in batch.points
+        if point.service in service_ids
+    }
+    if not keys:
+        return ()
+    rows = await session.scalars(
+        select(MetricSeries.id).where(
+            MetricSeries.project_id == batch.project_id,
+            tuple_(MetricSeries.service_id, MetricSeries.name, MetricSeries.attributes_hash).in_(
+                list(keys)
+            ),
+        )
+    )
+    return tuple(sorted(rows, key=str))
 
 
 async def store_log_batch(session: AsyncSession, batch: LogBatchMessage) -> StoreResult:

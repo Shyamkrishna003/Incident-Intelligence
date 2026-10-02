@@ -10,7 +10,7 @@ AI-assisted incident detection, investigation, root-cause analysis, and reliabil
 
 ## Status
 
-Implemented through **slice 4: the complete *Observe* stage (metrics, logs and deployments), sign-in for people, a web app, and a scenario simulator**:
+Implemented through **slice 5: *Observe* (metrics, logs, deployments) and *Detect* (anomaly detection), with sign-in for people, a web app, and a scenario simulator**:
 
 - **Foundation (slice 1):**
   - FastAPI backend with typed configuration, structured JSON logs (with secret redaction), and request IDs.
@@ -45,7 +45,13 @@ Implemented through **slice 4: the complete *Observe* stage (metrics, logs and d
   - The web app shows a service's logs under its chart, marks deployments on the chart, and lists deployments.
   - `ii simulate` generates a clearly labelled synthetic incident and sends it through the real ingestion API.
 
-Next come detection, incidents and AI investigation. See the architecture doc, §11.
+- **Anomaly detection (slice 5):**
+  - A detection consumer evaluates every new metric point against that series' recent normal range.
+  - Abnormal points in a row become one anomaly that opens, extends and closes, with the evidence recorded (the extreme value and what was usual).
+  - `ii eval detection` scores the detectors on labelled synthetic scenarios. The default was chosen from those results.
+  - The web app lists anomalies and shades them on the metric chart.
+
+Next come incidents (grouping related anomalies), then AI investigation. See the architecture doc, §11.
 
 ## How ingestion works
 
@@ -85,6 +91,7 @@ service ──POST /v1/ingest/{metrics,logs,deployments}──► API ── val
 - **Topics:**
   - `telemetry.metrics.v1` and `telemetry.logs.v1`: 6 partitions each, keyed by project, 3-day retention.
   - `telemetry.deployments.v1`: 1 partition, 7-day retention.
+  - `telemetry.metrics.stored.v1`: 6 partitions, 3-day retention. Published by the storage consumer after a metric batch is stored; read by the detection consumer.
   - Each has a dead-letter topic named `<topic>.dlq`: 1 partition, 14-day retention.
   - All have a 2 MiB max message size.
   - Topics are created by `ii kafka init`. The broker never auto-creates them.
@@ -92,6 +99,58 @@ service ──POST /v1/ingest/{metrics,logs,deployments}──► API ── val
   - A single broker in KRaft mode (no ZooKeeper), with the JVM heap capped at 512 MB.
   - It runs PLAINTEXT, without authentication, and is published on localhost only. TLS, SASL and ACLs come with deployment hardening.
 - **Operating cost:** one more service to run and monitor. Consumer lag is the key health metric (Prometheus arrives in the hardening slice).
+
+## Anomaly detection
+
+```
+storage consumer ── stores a metric batch ──► "metrics stored" event (Kafka)
+                                                      │
+                                                      ▼
+                         detection consumer ── reads the new points from PostgreSQL
+                                                      │
+                                                      ▼
+                                                  anomalies
+```
+
+Detection runs after storage, on an event that names the series with new points. It reads the points from PostgreSQL, so it never evaluates data that isn't stored yet.
+
+**How a point is judged (default detector: robust z-score).** Each new value is compared with the last 120 normal points of its series. The *score* is its distance from their median, measured in units of their typical spread (the median absolute deviation). A score of 6 or more, in either direction, is anomalous. A series is not judged until it has 30 points.
+
+**How points become an anomaly.**
+
+- **Opens** after 2 anomalous points in a row. A single odd point opens nothing.
+- **Extends** with each further anomalous point. A short return to normal doesn't split it.
+- **Closes as "recovered"** once a normal point arrives at least 2 minutes after the last anomalous one.
+- **Closes as "persisted"** after 6 hours open: the level is then treated as the new normal.
+- **The baseline is frozen** while an anomaly is open. Points inside an anomaly never enter the baseline, so an ongoing problem can't teach the detector that it's normal.
+- At most one open anomaly exists per series, enforced by the database.
+
+**What an anomaly records:** when it started, when it was detected, the most extreme value, what was usual just before (centre and spread), the direction, and a severity.
+
+**Severity and score are not probabilities.** The score is only comparable to the detector's own threshold. Severity is a fixed rule on it: low (at the threshold), medium (2× the threshold), high (4×), critical (8×). An anomaly is a statistical flag to investigate, not a confirmed problem.
+
+**Idempotent.** Each series has a recorded "evaluated through" time. Redelivered events and points at or before it are ignored, so nothing is detected twice.
+
+### Evaluation
+
+`make eval` (or `ii eval detection`) runs each detector over labelled synthetic scenarios and reports recall, precision, false positives and time to detect. Current results, at threshold 6 with 2 points in a row to open:
+
+| Detector | Problems found | False positives | Median time to detect |
+|---|---|---|---|
+| Static threshold (alert above 2× the usual level) | 9 of 11 | 0 | 30 s |
+| EWMA | 8 of 11 | 0 | 30 s |
+| **Robust z-score (default)** | **10 of 11** | **0** | **30 s** |
+
+The scenarios: the simulated payment incident (7 degrading series, 2 healthy), a healthy 6-hour day, a level shift, a brief spike, a gradual drift, a drop, isolated one-point glitches, a slow two-hour wave, bursty data, and extra-noisy data.
+
+- **What the default misses:** the gradual drift (a slow climb to double over 40 minutes). With no sudden change, the baseline follows the drift.
+- **Why not threshold 4:** it finds the same problems but raises a false alarm on the slow wave.
+- **What the simple rule misses:** a 60% level shift and a drop to 30%, because neither doubles the value.
+- **What EWMA misses:** it adapts to the change it should flag, so it misses the drift and some of the incident's slower series.
+
+These results describe behaviour on synthetic scenarios only. They are not evidence of performance on real production telemetry. A test fails if the default detector's results on these scenarios get worse.
+
+Detection settings (`DETECTION_*` in the environment) should be changed only together with a new evaluation run.
 
 ## Scenario simulator
 
@@ -125,7 +184,7 @@ The scenario, relative to the incident start `T`:
 | Credential | Project API key: `Authorization: Bearer ii_...` | Firebase ID token: `Authorization: Bearer <token>` |
 | Scope | Exactly one project, fixed by the key | Every organization the user is a member of |
 | Permissions | Key scopes: `ingest:write`, `telemetry:read` | Role in the organization (below) |
-| Endpoints | `/v1/project`, `/v1/ingest/...`, `/v1/services/...`, `/v1/deployments` | `/v1/me`, `/v1/organizations/...`, `/v1/projects/...` |
+| Endpoints | `/v1/project`, `/v1/ingest/...`, `/v1/services/...`, `/v1/deployments`, `/v1/anomalies` | `/v1/me`, `/v1/organizations/...`, `/v1/projects/...` |
 
 The two are not interchangeable: an API key is rejected on user endpoints, and an ID token on key endpoints.
 
@@ -211,7 +270,8 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | Sign in | Email/password, Google or GitHub. If the email already belongs to an account with a different method, the app asks the user to sign in the original way and then links the new method. |
 | Setup | Shown until the user can reach a project. Asks for email verification first, then creates an organization and its first project. If setup was interrupted after the organization was created, it asks only for the project. |
 | Services | The services that have sent telemetry to the selected project. Refreshes when opened and every 30 seconds. |
-| Service | Pick a metric and a time range (15 minutes to 24 hours). One line per series (attribute set), a legend, a hover readout of every series, and the same values as a table. Deployments of the service are marked on the chart. Below it, the service's logs for the same time range, filterable by severity and text. Refreshes every 30 seconds. |
+| Service | Pick a metric and a time range (15 minutes to 24 hours). One line per series (attribute set), a legend, a hover readout of every series, and the same values as a table. Deployments of the service are marked on the chart, and periods with a detected anomaly are shaded. Below it, the service's logs for the same time range, filterable by severity and text. Refreshes every 30 seconds. |
+| Anomalies | Anomalies in the last 24 hours, ongoing first. Each row shows the evidence ("rose to 1,700 ms, usually about 120 ms") and links to the metric's chart. |
 | Deployments | The project's deployments in the last 7 days, newest first, each linking to its service. |
 | API keys | Admins and owners only. Create a key (shown once, with a copy button) and revoke keys after confirmation. |
 
@@ -232,6 +292,7 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | POST | `/v1/ingest/deployments` | API key with `ingest:write` | Accepts 1–100 deployment events (service, version, time; optional commit, environment, who, description). |
 | GET | `/v1/services/{service}/logs` | API key with `telemetry:read` | Log records in `[start, end)` (default: the last hour; at most 24 h), newest first. `severity` returns that level and above; `q` matches text in the message; `limit` is at most 1000. |
 | GET | `/v1/deployments` | API key with `telemetry:read` | Deployments in `[start, end)` (default: the last 7 days; at most 31), newest first. `service` filters to one service. |
+| GET | `/v1/anomalies` | API key with `telemetry:read` | Anomalies overlapping `[start, end)` (default: the last 24 hours; at most 31 days), ongoing first. Filters: `status` (`open`, `closed`, `all`), `service`, `metric`. |
 | GET | `/v1/services` | API key with `telemetry:read` | Services that have sent telemetry to this project |
 | GET | `/v1/me` | signed-in user | The user, their organizations and roles, and each organization's projects. Creates the user record on first call. |
 | POST | `/v1/organizations` | signed-in user, verified email | Create an organization. The caller becomes its owner. |
@@ -243,6 +304,7 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | GET | `/v1/projects/{project_id}/services/{service}/metrics/{metric}` | any member | Metric points, same parameters as the API-key endpoint |
 | GET | `/v1/projects/{project_id}/services/{service}/logs` | any member | Log records, same parameters as the API-key endpoint |
 | GET | `/v1/projects/{project_id}/deployments` | any member | Deployments, same parameters as the API-key endpoint |
+| GET | `/v1/projects/{project_id}/anomalies` | any member | Anomalies, same parameters as the API-key endpoint |
 | GET | `/v1/services/{service}/metrics` | API key with `telemetry:read` | The metrics a service has reported, with the number of series each has. Also at `/v1/projects/{project_id}/services/{service}/metrics` for signed-in users. |
 | GET | `/v1/services/{service}/metrics/{metric}` | API key with `telemetry:read` | Points in `[start, end)` (default: the last hour; at most 24 h), grouped by attribute set. `limit` defaults to 1000 and can be at most 10 000; `truncated` is true if more points exist. |
 
@@ -279,6 +341,8 @@ ii api-keys list   --org acme --project payments
 ii api-keys revoke --prefix <12-char prefix>
 ii kafka init                      # create missing topics (existing ones are left unchanged)
 ii consume storage                 # run the storage consumer until SIGTERM/SIGINT
+ii consume detection               # run the detection consumer
+ii eval detection                  # score the detectors on labelled synthetic scenarios
 ii dlq inspect [--kind metrics|logs|deployments] [--limit 20] [--show-values]   # bodies hidden by default
 ii simulate [--live] [--no-incident] [--backfill-minutes 60] [--incident-after-minutes 45] [--seed 1]
 ```
@@ -297,6 +361,7 @@ ii simulate [--live] [--no-incident] [--backfill-minutes 60] [--incident-after-m
 | `make typecheck` | mypy `--strict` |
 | `make test` | pytest: unit, integration (PostgreSQL), Redis, and end-to-end (Kafka). Needs `make infra`. Emulator tests also need `make emulator`. |
 | `make test-unit` | tests that need no PostgreSQL, Kafka or Redis |
+| `make eval` | score the detectors on labelled synthetic scenarios |
 | `make logs` / `make dlq` | follow API and consumer logs / inspect the dead-letter topic |
 | `make lock` | re-pin dependencies after editing `backend/pyproject.toml` |
 
@@ -314,6 +379,9 @@ ii simulate [--live] [--no-incident] [--backfill-minutes 60] [--incident-after-m
   - Every other test uses an in-memory stand-in. A contract suite runs the same checks against both the stand-in and real Redis, so the two can't drift apart.
   - Each test uses a random key prefix and deletes only its own keys.
 - **Frontend tests** (Vitest and React Testing Library) cover the API client, sign-in, setup, the services list, API keys, the chart's legend and table, and routing by sign-in state and role. They use a fake auth context and never contact Firebase.
+- **Detection** is tested as pure logic (detectors, the anomaly engine), against PostgreSQL, and end to end through Kafka.
+  - One test checks that evaluating a series a few points at a time through the database finds exactly the anomalies the pure engine finds in a single pass.
+  - Another holds the default detector to its evaluated results.
 - **Consumer delivery rules** (commit only after success, retry transient errors, dead-letter permanent ones) are unit-tested with an in-memory message source.
 
 ### Layout
@@ -331,6 +399,7 @@ backend/
     streaming/   Kafka: topics, async publisher, consumer loop with dead-lettering, admin
     ingestion/   ingestion API: schemas, normalization, publishing
     telemetry/   message contracts, models, idempotent storage consumer, read APIs
+    detection/   detectors, anomaly engine, detection consumer, evaluation suite, anomalies API
     simulator/   synthetic incident scenario, sender, backfill and live runner
     migrations/  Alembic environment and revisions (shipped inside the package)
     cli.py       `ii` admin CLI
@@ -373,6 +442,12 @@ See [.env.example](.env.example).
 - **Rate-limit bursts:** the fixed window allows up to twice the limit across a window boundary.
 - **Idempotency memory is 24 hours.** A key reused with different data after that, or while Redis is down, is caught by the consumer and dead-lettered instead of getting a 409.
 - **`last_used_at`** for an API key is updated when the key is loaded from the database, so it can lag by the cache TTL (60 s).
+- **Detection misses slow drifts** (see the evaluation above), and it has been evaluated on synthetic data only.
+- **No seasonality awareness.** A metric with a strong daily pattern steeper than the tested slow wave may raise false alarms.
+- **Late metric points are not evaluated.** A point older than what its series has already been evaluated through is stored but skipped by detection.
+- **An anomaly on a series that stops reporting stays open** until a later point arrives.
+- **No user-configured thresholds or alert rules yet,** and no notifications. Anomalies are visible in the app and the API only.
+- **Anomalies aren't grouped yet.** One incident shows as several anomalies (seven in the simulated one). Grouping them into incidents is the next slice.
 - **No retention job.** Logs and metrics are kept indefinitely for now; the planned limits (7 days for logs, 30 for metrics) aren't enforced yet.
 - **Log search is a plain text match** within one service and time range, with no index. It's fine at this volume and will need revisiting at higher volume.
 - **Log queries return the newest matches only** (up to `limit`), with no paging to older ones.

@@ -4,7 +4,7 @@ import type { ProjectContext } from "../components/AppShell";
 import { LogsPanel } from "../components/LogsPanel";
 import { MetricChart } from "../components/MetricChart";
 import { Card, EmptyState, ErrorState, LoadingState, PageHeader } from "../components/ui";
-import { useDeployments, useMetricRange, useMetrics } from "../hooks/queries";
+import { useAnomalies, useDeployments, useMetricRange, useMetrics } from "../hooks/queries";
 
 const RANGES = [
   { minutes: 15, label: "15 min" },
@@ -32,6 +32,7 @@ export function ServicePage({ current }: { current: ProjectContext }) {
   const range = useMetricRange(current.project.id, service, metric, rangeMinutes);
   // Marked on the chart. If this fails the chart still renders, just without markers.
   const deployments = useDeployments(current.project.id, rangeMinutes, service);
+  const anomalies = useAnomalies(current.project.id, rangeMinutes, { service, metric });
 
   function update(next: { metric?: string; range?: number }) {
     const updated = new URLSearchParams(params);
@@ -120,6 +121,7 @@ export function ServicePage({ current }: { current: ProjectContext }) {
                   data={range.data}
                   stale={range.isPlaceholderData}
                   deployments={deployments.data ?? []}
+                  anomalies={anomalies.data ?? []}
                 />
               )}
             </Card>

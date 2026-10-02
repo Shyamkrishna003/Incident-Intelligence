@@ -2,6 +2,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceArea,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -17,7 +18,7 @@ import {
   formatValue,
   seriesLabel,
 } from "../lib/format";
-import type { Deployment, MetricRange } from "../lib/types";
+import type { Anomaly, Deployment, MetricRange } from "../lib/types";
 import { EmptyState } from "./ui";
 
 const TABLE_ROW_LIMIT = 200;
@@ -44,11 +45,14 @@ export function MetricChart({
   data,
   stale,
   deployments = [],
+  anomalies = [],
 }: {
   data: MetricRange;
   stale: boolean;
   /** Deployments of this service; those inside the charted range are marked. */
   deployments?: Deployment[];
+  /** Anomalies detected on this metric; their time spans are shaded. */
+  anomalies?: Anomaly[];
 }) {
   const shown = data.series.slice(0, MAX_SERIES);
   const hidden = data.series.length - shown.length;
@@ -63,6 +67,15 @@ export function MetricChart({
     .map((deployment) => ({ ...deployment, at: Date.parse(deployment.deployed_at) }))
     .filter((deployment) => deployment.at >= startMs && deployment.at <= endMs)
     .sort((a, b) => a.at - b.at);
+  // An open anomaly runs to the right edge of the chart.
+  const shaded = anomalies
+    .map((anomaly) => ({
+      ...anomaly,
+      from: Math.max(startMs, Date.parse(anomaly.started_at)),
+      to: Math.min(endMs, anomaly.status === "open" ? endMs : Date.parse(anomaly.last_anomalous_at)),
+    }))
+    .filter((anomaly) => anomaly.to >= anomaly.from)
+    .sort((a, b) => a.from - b.from);
 
   if (rows.length === 0) {
     return (
@@ -138,6 +151,17 @@ export function MetricChart({
               cursor={{ stroke: "var(--axis)", strokeWidth: 1 }}
               isAnimationActive={false}
             />
+            {/* Anomaly periods: a light wash in the reserved "critical" status colour. */}
+            {shaded.map((anomaly) => (
+              <ReferenceArea
+                key={anomaly.id}
+                x1={anomaly.from}
+                x2={anomaly.to}
+                fill="var(--critical)"
+                fillOpacity={0.1}
+                stroke="none"
+              />
+            ))}
             {/* Deployment markers: neutral ink, so they never read as a data series. */}
             {marked.map((deployment) => (
               <ReferenceLine
@@ -177,6 +201,20 @@ export function MetricChart({
         {unit && <span>Values in {unit}.</span>}
         {/* With one series there is no legend, so its attributes are named here. */}
         {shown.length === 1 && labels[0] !== "all" && <span>Series: {labels[0]}.</span>}
+        {shaded.length > 0 && (
+          <span>
+            Shaded: anomaly detected{" "}
+            {shaded
+              .map(
+                (anomaly) =>
+                  `${formatTime(Date.parse(anomaly.started_at))} to ${
+                    anomaly.status === "open" ? "now (ongoing)" : formatTime(Date.parse(anomaly.last_anomalous_at))
+                  }, ${anomaly.severity}`,
+              )
+              .join("; ")}
+            .
+          </span>
+        )}
         {marked.length > 0 && (
           <span>
             Vertical lines mark deployments:{" "}

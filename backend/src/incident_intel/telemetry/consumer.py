@@ -17,13 +17,13 @@ from incident_intel.streaming.consumer import (
     PermanentMessageError,
     run_consumer,
 )
-from incident_intel.streaming.producer import KafkaPublisher
+from incident_intel.streaming.producer import KafkaPublisher, MessagePublisher
 from incident_intel.streaming.topics import (
     DEPLOYMENTS,
     LOGS,
     METRICS,
+    METRICS_STORED,
     TELEMETRY_TOPICS,
-    TopicSpec,
     topic_name,
 )
 from incident_intel.telemetry.messages import (
@@ -31,6 +31,7 @@ from incident_intel.telemetry.messages import (
     DeploymentBatchMessage,
     LogBatchMessage,
     MetricBatchMessage,
+    MetricsStoredEvent,
 )
 from incident_intel.telemetry.storage import (
     IdempotencyConflictError,
@@ -72,6 +73,9 @@ class BatchHandler[BatchT: BatchEnvelope]:
         self._store = store
 
     async def __call__(self, message: ConsumedMessage) -> None:
+        await self.process(message)
+
+    async def process(self, message: ConsumedMessage) -> tuple[BatchT, StoreResult]:
         try:
             batch = self._message_type.model_validate_json(message.value)
         except ValidationError as exc:
@@ -101,12 +105,43 @@ class BatchHandler[BatchT: BatchEnvelope]:
             outcome=result.outcome.value,
             stored=result.stored_points,
         )
+        return batch, result
 
 
-def metric_handler(session_factory: async_sessionmaker[AsyncSession]) -> MessageHandler:
-    return BatchHandler(
+def metric_handler(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    publisher: MessagePublisher | None = None,
+    stored_topic: str | None = None,
+) -> MessageHandler:
+    """Stores metric batches and, when given a publisher, announces what was stored."""
+    store = BatchHandler(
         session_factory, kind="metrics", message_type=MetricBatchMessage, store=store_metric_batch
     )
+    if publisher is None or stored_topic is None:
+        return store
+
+    async def handle(message: ConsumedMessage) -> None:
+        batch, result = await store.process(message)
+        if not result.series_ids:
+            return
+        event = MetricsStoredEvent(
+            organization_id=batch.organization_id,
+            project_id=batch.project_id,
+            batch_id=batch.batch_id,
+            series_ids=list(result.series_ids),
+        )
+        # After the database commit, and also for a redelivered batch: if this process
+        # dies between the commit and this publish, the redelivery announces it. A failed
+        # publish raises, so the message is retried rather than acknowledged.
+        await publisher.publish(
+            stored_topic,
+            key=str(batch.project_id).encode(),
+            value=event.model_dump_json().encode(),
+            headers={k: v for k, v in message.headers.items() if k == "request_id"},
+        )
+
+    return handle
 
 
 def log_handler(session_factory: async_sessionmaker[AsyncSession]) -> MessageHandler:
@@ -124,22 +159,23 @@ def deployment_handler(session_factory: async_sessionmaker[AsyncSession]) -> Mes
     )
 
 
-_HANDLER_FACTORIES: dict[
-    TopicSpec, Callable[[async_sessionmaker[AsyncSession]], MessageHandler]
-] = {
-    METRICS: metric_handler,
-    LOGS: log_handler,
-    DEPLOYMENTS: deployment_handler,
-}
-
-
 def storage_handler(
-    settings: RuntimeSettings, session_factory: async_sessionmaker[AsyncSession]
+    settings: RuntimeSettings,
+    session_factory: async_sessionmaker[AsyncSession],
+    publisher: MessagePublisher | None = None,
 ) -> MessageHandler:
-    """One handler for every telemetry topic: each message goes to its topic's handler."""
+    """One handler for every telemetry topic: each message goes to its topic's handler.
+
+    With a ``publisher``, stored metric batches are announced on the "metrics stored" topic.
+    """
     by_topic = {
-        topic_name(settings, spec): factory(session_factory)
-        for spec, factory in _HANDLER_FACTORIES.items()
+        topic_name(settings, LOGS): log_handler(session_factory),
+        topic_name(settings, DEPLOYMENTS): deployment_handler(session_factory),
+        topic_name(settings, METRICS): metric_handler(
+            session_factory,
+            publisher=publisher,
+            stored_topic=topic_name(settings, METRICS_STORED),
+        ),
     }
 
     async def handle(message: ConsumedMessage) -> None:
@@ -168,7 +204,7 @@ async def run_storage_consumer(settings: RuntimeSettings, stop: asyncio.Event) -
     try:
         await run_consumer(
             source=source,
-            handler=storage_handler(settings, create_session_factory(engine)),
+            handler=storage_handler(settings, create_session_factory(engine), publisher),
             publisher=publisher,
             dlq_topic=dead_letters,
             stop=stop,

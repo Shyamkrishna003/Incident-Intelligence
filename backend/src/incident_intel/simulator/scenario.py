@@ -49,7 +49,7 @@ class MetricSpec:
 METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("payments-db", "db.query.duration.p95", "ms", 15, 900, 0.08),
     MetricSpec("payments-db", "db.sequential_scans.rate", "1/s", 0.2, 40, 0.15),
-    MetricSpec("payment-api", "db.client.connections.utilization", "%", 35, 98, 0.04),
+    MetricSpec("payment-api", "db.client.connections.utilization", "%", 35, 95, 0.04),
     MetricSpec("payment-api", "http.server.duration.p95", "ms", 120, 1700, 0.06),
     MetricSpec("payment-api", "http.server.error_rate", "%", 0.2, 12, 0.2),
     MetricSpec("checkout-web", "http.server.duration.p95", "ms", 90, 600, 0.06, DOWNSTREAM_LAG),
