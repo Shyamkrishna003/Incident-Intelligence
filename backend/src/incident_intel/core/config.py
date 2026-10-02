@@ -1,12 +1,21 @@
-"""Application configuration, loaded from environment variables (and `.env` in local dev)."""
+"""Application configuration, loaded from environment variables (and `.env` in local dev).
+
+Settings are layered so each process receives only what it needs:
+
+- ``DatabaseSettings``: PostgreSQL access (migrations).
+- ``RuntimeSettings``: + logging and Kafka (background consumers; no API secrets).
+- ``Settings``: + API-only secrets and request limits (the HTTP API and admin CLI).
+"""
 
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
+
+_MIB = 1024 * 1024
 
 
 class DatabaseSettings(BaseSettings):
@@ -28,19 +37,110 @@ class DatabaseSettings(BaseSettings):
         return value
 
 
-class Settings(DatabaseSettings):
+class RuntimeSettings(DatabaseSettings):
     environment: Literal["local", "test", "production"] = "local"
     log_level: LogLevel = "INFO"
     log_json: bool = True
 
+    kafka_bootstrap_servers: str = "localhost:9094"
+    kafka_client_id: str = "incident-intel"
+    # Prepended to every topic name; lets tests or environments share one cluster.
+    kafka_topic_prefix: str = Field(default="", pattern=r"^[A-Za-z0-9._-]*$")
+    kafka_replication_factor: int = Field(default=1, ge=1)
+    # Largest single Kafka message we produce or accept (a full ingestion batch).
+    kafka_max_message_bytes: int = Field(default=2 * _MIB, ge=_MIB)
+
+    # Anomaly detection. The defaults were chosen with `ii eval detection`; change them
+    # only together with a new evaluation run.
+    detection_detector: Literal["robust_zscore", "ewma"] = "robust_zscore"
+    # How many "typical spreads" from normal a value must be to count as anomalous.
+    detection_threshold: float = Field(default=6.0, gt=0)
+    # Normal points needed before a series is judged at all.
+    detection_min_history: int = Field(default=30, ge=5)
+    # How many recent normal points form the baseline.
+    detection_window: int = Field(default=120, ge=10)
+    # Anomalous points in a row needed to open an anomaly.
+    detection_min_consecutive: int = Field(default=2, ge=1)
+    # A normal point this long after the last anomalous one closes the anomaly.
+    detection_close_after_seconds: int = Field(default=120, ge=0)
+    # An anomaly open this long is closed and its level accepted as the new normal.
+    detection_max_open_seconds: int = Field(default=6 * 3600, ge=60)
+
+    # Incident grouping. An anomaly can join an incident if it started within this long of
+    # the incident's activity (and is on the same or a directly dependent service).
+    correlation_window_seconds: int = Field(default=15 * 60, ge=0)
+    # Deployments of an incident's services this long before it started are linked as
+    # candidates for "what changed".
+    deployment_lookback_seconds: int = Field(default=60 * 60, ge=0)
+
+
+class Settings(RuntimeSettings):
     # Server-side secret mixed into API-key hashes. Rotating it invalidates all keys.
     api_key_pepper: SecretStr = Field(min_length=32)
     # Avoid a database write on every authenticated request.
     api_key_last_used_resolution_seconds: int = Field(default=60, ge=0)
 
     readiness_timeout_seconds: float = Field(default=2.0, gt=0)
+    max_request_body_bytes: int = Field(default=_MIB, ge=1024)
+
+    # How long the API waits for Kafka to acknowledge a batch before answering 503.
+    kafka_produce_timeout_seconds: float = Field(default=5.0, gt=0)
+
+    ingest_max_point_age_seconds: int = Field(default=7 * 24 * 3600, gt=0)
+    ingest_max_future_skew_seconds: int = Field(default=300, ge=0)
+
+    # Redis: a cache and limiter only, never the source of truth. SecretStr because the
+    # URL may carry a password.
+    redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
+    # Prepended to every key; lets tests or environments share one Redis.
+    redis_key_prefix: str = Field(default="ii:", pattern=r"^[A-Za-z0-9._:-]*$")
+    # Kept short: Redis is on the request path, and every use has a fallback.
+    redis_timeout_seconds: float = Field(default=0.25, gt=0)
+
+    # Each API key may make this many requests per window; beyond it the API answers 429.
+    rate_limit_requests: int = Field(default=600, ge=1)
+    rate_limit_window_seconds: int = Field(default=60, ge=1)
+    # While Redis is unreachable: True lets requests through, False rejects them (503).
+    rate_limit_fail_open: bool = True
+
+    # How long an Idempotency-Key is remembered at the API edge.
+    idempotency_ttl_seconds: int = Field(default=24 * 3600, ge=60)
+    # How long a verified API key is cached (0 disables the cache). Also the longest a
+    # revoked key could keep working if Redis is unreachable at the moment of revocation.
+    api_key_cache_ttl_seconds: int = Field(default=60, ge=0, le=3600)
+
+    # Firebase Authentication proves who a human user is. Only the project ID is needed
+    # to verify ID tokens (it is their audience). Unset: user sign-in is unavailable.
+    firebase_project_id: str | None = Field(default=None, pattern=r"^[a-z0-9-]{4,40}$")
+    # Local development only: verify against the Firebase Auth emulator, which issues
+    # UNSIGNED tokens. Refused in production (see the validator below).
+    firebase_auth_emulator_host: str | None = None
+    # Abuse limit for self-service sign-up.
+    max_owned_organizations_per_user: int = Field(default=10, ge=1)
+    # Each investigation calls an LLM: cap how many one incident can get per hour.
+    investigations_per_incident_per_hour: int = Field(default=6, ge=1)
+
+    @field_validator("firebase_project_id", "firebase_auth_emulator_host", mode="before")
+    @classmethod
+    def _empty_means_unset(cls, value: object) -> object:
+        # `FIREBASE_PROJECT_ID=` in an env file arrives as an empty string.
+        return None if value == "" else value
+
+    @model_validator(mode="after")
+    def _no_emulator_in_production(self) -> "Settings":
+        if self.environment == "production" and self.firebase_auth_emulator_host:
+            raise ValueError(
+                "FIREBASE_AUTH_EMULATOR_HOST must not be set when ENVIRONMENT=production: "
+                "the emulator accepts unsigned tokens"
+            )
+        return self
 
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+@lru_cache
+def get_runtime_settings() -> RuntimeSettings:
+    return RuntimeSettings()

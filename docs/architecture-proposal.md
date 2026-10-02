@@ -476,3 +476,310 @@ Implemented as planned in §12. Deviations and details decided during implementa
 | CI workflow | Not added | Waiting on a GitHub remote. |
 
 Pinned versions at implementation: FastAPI 0.141, Starlette 1.7, SQLAlchemy 2.1, Pydantic 2.13, Alembic 1.20, structlog 26.1, pytest 9.1, pytest-asyncio 1.4, mypy 2.3, ruff 0.16.
+
+---
+
+## 14. Slice 2a (Kafka ingestion pipeline): implementation record
+
+Implemented as approved. Decisions and deviations made during implementation:
+
+| Planned / assumed | Implemented | Why |
+|---|---|---|
+| Kafka message key `project_id:service` (§5) | Key = `project_id`, **one message per batch** | A batch can span several services. One message keeps a batch atomic (one produce, one ack, one DB transaction) and still orders each series. The cost is that one large tenant uses one partition at a time. Revisit if measured. |
+| `ingest_batches` unique `(project_id, idempotency_key)` | `batch_id = uuid5(project_id, key)` as the primary key | Deterministic ids give retries the same `batch_id` before Redis exists. The primary key is the dedupe point. |
+| `body_sha256` of the raw request | `content_sha256` of the **normalized** points | Formatting differences in a retried request don't create false conflicts. |
+| — | `metric_points` carries `project_id` only (not `organization_id`) | It's the highest-volume table. The series carries the rest of the tenant chain, and a composite FK enforces project consistency. |
+| — | Values must be JSON numbers (strict) | Lax parsing accepted `"350"` as 350.0. A test caught it. |
+| — | 422s from batch rules use the same `validation_error` code as schema errors | Clients handle one kind of 422. |
+| DB outage surfaced as 500 | `OSError` and SQLAlchemy `OperationalError`/`InterfaceError` → **503 + Retry-After** | Found during the Docker outage test. Unexpected errors are now answered by the request-context middleware, so 500s carry a request id too. |
+| Migrations run by hand in Docker | One-shot `migrate` and `kafka-init` compose services; `api` and `storage-consumer` wait for both | `make up` gives a working stack from scratch. |
+| — | The storage consumer's inherited HTTP health check is disabled | Consumers serve no HTTP. Consumer lag (hardening slice) is the right signal. |
+| — | Worker processes load `RuntimeSettings` (no API-key pepper) | Least privilege: only the API holds the pepper. |
+| `examples/metrics.json` | `examples/send-metrics.sh` | The API accepts only recent timestamps, so a static file would go stale. |
+
+Verified on the Docker stack:
+- ingest, then read back
+- replay stored once
+- PostgreSQL outage: API 503, consumer retries without committing, then stores on recovery
+- poison message dead-lettered without blocking the following batch
+- Kafka outage: API 503 within ~5 s; retry after recovery accepted
+- topics survive a broker restart
+
+Pinned: `confluent-kafka` 2.15.1 (librdkafka 2.15.1), image `apache/kafka:4.3.1`.
+
+---
+
+## 15. Slice 2b (Redis): implementation record
+
+Redis now does three jobs at the API edge. It is never the source of truth and runs without persistence.
+
+| Job | How | When Redis is down |
+|---|---|---|
+| Rate limiting per API key | Fixed-window counter (`INCR` + `EXPIRE` in one `MULTI`), key `ii:rl:<api key id>:<window>`. Default 600 requests per 60 s. Over the limit → 429 with `Retry-After`. | Requests are let through (`RATE_LIMIT_FAIL_OPEN=false` answers 503 instead). |
+| Idempotency claims | `SET NX` of `<content hash>:pending` under `ii:idem:<project>:<key>` for 24 h, switched to `published` after Kafka acknowledges. Different content → 409. A retry of a `published` batch returns the same `batch_id` without publishing. | The check is skipped. The storage consumer still stores each batch once and dead-letters conflicts. |
+| API-key cache | The verified key record (HMAC, tenant ids, scopes, expiry) under `ii:apikey:<prefix>` for 60 s. Only active keys are cached. Revocation deletes the entry. | Authentication uses PostgreSQL. |
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| A retry of a `pending` claim publishes again | The first attempt may have died before reaching Kafka. Skipping the publish there could lose data; a duplicate message is harmless because the consumer dedupes. Only a Kafka-acknowledged batch is skipped on retry. |
+| The claim is made after validation | A batch rejected with 422 doesn't use up its Idempotency-Key. |
+| `RedisGateway` with a circuit breaker | One error type for callers, and after a failure Redis is skipped for 5 s, so an outage costs one short timeout (0.25 s) instead of one per request. Client-side retries are off. |
+| `/readyz` reports Redis but doesn't require it | Every use has a fallback, so an outage must not take the API out of rotation. |
+| Fixed window instead of a token bucket | No Lua script, easy to reason about. It allows up to 2x the limit across a window boundary, which is acceptable for flood protection. |
+| Rate limit applied after authentication, per key | One key can't use up another's budget. Unauthenticated floods aren't limited yet (a per-IP limit belongs at the edge, in the hardening slice). |
+| Revocation invalidates the cache from the CLI | Immediate when Redis is reachable. Otherwise the CLI warns that the key may work for up to the cache TTL. |
+| In-memory `FakeCache` plus a contract test suite | Most tests need no Redis. The same behavioral tests run against the fake and real Redis, so the fake can't drift. |
+| Kafka end-to-end tests run with the cache "unavailable" | They prove the pipeline's own guarantees hold without the API-edge check. |
+| Dockerfile: pip cache mount, longer timeouts | Image builds failed on a slow connection to PyPI. |
+
+Verified on the running stack:
+- a retried batch reaches Kafka once; different data under the same key gets 409
+- the ninth request against a limit of 8 gets 429 with `Retry-After`
+- a cached key is rejected immediately after `ii api-keys revoke`
+- with Redis stopped: requests and ingestion succeed in milliseconds, `/readyz` stays ready and reports `redis: unavailable`, and the CLI warns on revoke
+- after Redis restarts, the API recovers on its own (`redis_unavailable` and `redis_recovered` are each logged once)
+
+Pinned: `redis` (Python client) 8.1.0, image `redis:8-alpine` (8.10.2 at implementation).
+
+---
+
+## 16. Slice 3a (users, sign-in, roles): implementation record
+
+People can now call the API. Firebase Authentication proves identity; PostgreSQL decides authorization.
+
+- **Migration `0003`:** `users` (Firebase UID, email, verified flag, display name) and `memberships` (organization, user, role).
+- **`auth/tokens.py`:** a `TokenVerifier` interface with a Firebase implementation (official `firebase-admin` SDK), a disabled one (no project ID configured), and a fake for tests.
+- **`tenancy/access.py`:** `authorize_organization` and `authorize_project` check the caller's membership and role. Non-members get 404; members with too low a role get 403.
+- **`tenancy/console_router.py`** and a second telemetry router: the user endpoints under `/v1/me`, `/v1/organizations` and `/v1/projects/{project_id}`.
+- **`TenantScope`:** the organization and project a request may touch. API-key requests and user requests both produce one, and the telemetry queries accept either.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Any user with a verified email may create an organization; invitations are left out | The recommended options from the plan. Each user may own at most 10 organizations, as an abuse limit. |
+| The SDK is given an explicit anonymous credential | Verifying a token needs only Google's public keys, but the SDK otherwise looks for Google application credentials and fails slowly without them. Found by a test. |
+| Authorization never uses Firebase custom claims | They can be up to an hour stale. Reading memberships from PostgreSQL on each request makes role changes immediate. |
+| Separate endpoints for API keys and users | A credential of one kind is never accepted where the other is expected, so there is no ambiguity about what a bearer token is. |
+| `revoke_api_key` takes an optional `project_id` | A user acting on one project can't revoke another project's key by guessing its prefix. |
+| The organization and its owner membership are created in one transaction | A user-created organization can't be left without an owner. |
+| The user row is written only on first sign-in or when the token's profile fields change | No database write on ordinary requests. |
+| Emulator mode is refused when `ENVIRONMENT=production` | The emulator accepts unsigned tokens and doesn't check expiry. |
+| The emulator is an optional Compose profile | The image is large, and a real Firebase project is available for development. |
+
+Costs:
+- `firebase-admin` adds 31 packages to the runtime lock (Google API, gRPC and Firestore clients come with it), which makes the image larger and its first build slower.
+
+Verified:
+- every role against every user endpoint, and 404 for other organizations' resources
+- a key created through the API works as a machine credential and stops working when revoked
+- against the real Firebase project ID: a forged token with the right audience and issuer is rejected after the SDK fetches Google's public keys (about 0.25 s once, then about 3 ms from cache); no user row is created and the token doesn't appear in logs
+
+Pinned: `firebase-admin` 7.7.0, `firebase-tools` 15.32.1 (emulator image).
+
+---
+
+## 17. Slice 3b (web app): implementation record
+
+A React single-page app in `frontend/`: React 19, TypeScript (strict), Vite, Tailwind CSS, TanStack Query, React Router, Recharts and the Firebase JS SDK.
+
+- **Auth:** `auth/AuthContext.tsx` wraps Firebase Authentication. The API client asks it for the current ID token on every request and retries once with a fresh token after a 401.
+- **Data:** `hooks/queries.ts` holds every query and mutation. Cache keys include the user id, and the cache is cleared on sign-out.
+- **Screens:** sign-in, setup, services, service (chart), API keys. Each handles loading, empty and error states.
+- **Backend addition:** `GET .../services/{service}/metrics` lists a service's metrics. The chart page needs it to offer a metric picker.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| One `.env` for the repo; Vite reads it with `envDir: ".."` | Vite exposes only `VITE_`-prefixed variables to the browser, so backend secrets in the same file stay out of the bundle. |
+| The dev server proxies `/v1` to the API | The browser sees one origin, so the API needs no CORS configuration. |
+| Account linking waits for the user to sign in the original way | Firebase no longer reveals which sign-in method an email uses (email enumeration protection), so the app can't pick the method for them. |
+| Email verification is a step in setup, for every sign-in method | The API requires a verified email to create an organization, and Firebase doesn't treat GitHub emails as verified. |
+| Role checks in the app only hide controls | The API enforces roles. A user who forces a hidden page gets a 403 or 404 from the server. |
+| The services and metrics lists refetch on every visit | New services appear when they first send data, outside the app. Found in the browser run: a cached empty list hid a service that had just started reporting. |
+| The chart page is loaded on demand | The chart library is about a third of the JavaScript. |
+| Chart: validated 8-colour categorical palette, 2px lines, legend for two or more series, hover readout of every series, table view | The colours pass a colour-blindness check in light and dark themes. Three light-theme colours are low-contrast against the background, so the table view is always available. |
+| At most 8 series per chart | The palette has 8 validated colours. The chart says when series are left out. |
+
+Verified in a real browser (Chrome, driven by a script, against the Firebase emulator):
+- sign up, verify email, create an organization and project, create an API key
+- ingest 93 points with that key, then see the service and its chart with two series
+- the hover readout, dark theme, table view, and a 390px-wide phone layout with no horizontal overflow
+- no failed API requests and no page errors
+
+Not verified: sign-in with real Google and GitHub accounts, and the account-linking flow against real providers.
+
+---
+
+## 18. Slice 4 (logs, deployments, simulator): implementation record
+
+The *Observe* stage now covers metrics, logs and deployments, and there is a repeatable source of test telemetry.
+
+- **Ingestion:** `POST /v1/ingest/logs` and `POST /v1/ingest/deployments`, sharing one code path with metrics (`ingestion/service.py`). Only validation, message type and topic differ.
+- **Kafka:** topics `telemetry.logs.v1` and `telemetry.deployments.v1`, each with its own dead-letter topic. One storage consumer subscribes to all three telemetry topics and routes by topic.
+- **Storage (migration `0004`):** `log_records`, `deployments`, and a `kind` column on `ingest_batches`.
+- **Reads:** logs per service (severity and text filters) and deployments per project, for API keys and for signed-in users.
+- **Simulator:** `simulator/scenario.py` (pure functions of time), `client.py` (sender) and `runner.py` (backfill and live modes), behind `ii simulate`.
+- **Web app:** logs panel and deployment markers on the service page, and a deployments page.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Logs stay in PostgreSQL | As planned for the MVP. One store, tenant-scoped the same way as everything else. Revisit (for example Loki) when volume requires it. |
+| Logs are deduplicated per batch only | Log lines have no natural identity, and identical lines at the same instant are legitimate. The batch claim and the records are written in one transaction, so a redelivered batch stores nothing twice. |
+| Deployments are also unique on (project, service, version, time) | A retried CI job may report the same deployment under a new idempotency key. |
+| Idempotency keys are scoped per kind (`logs/<key>`, `deployments/<key>`) | The same key on two endpoints must not collide. Metrics keep the bare key, so existing batch ids are unchanged. A client key can't contain `/`, so the scopes can't overlap. |
+| Deployments go through Kafka too, on a single partition | The detection and correlation consumers will read them from the stream, in order. The volume is tiny. |
+| The consumer's dead-letter target is a mapping from source topic | Each topic keeps its own dead-letter topic. A missing mapping entry is retried and logged, never dropped. |
+| Severity is stored as an OpenTelemetry-style number | "This level and above" is a simple comparison, and OTLP ingestion can map onto it later. |
+| Service dependencies are deferred to the correlation slice | Nothing uses them yet. |
+| The simulator's values depend only on the seed and the timestamp | Re-running over the same period yields identical batches, which the API recognizes as retries. It also makes the scenario usable as a fixed evaluation case for detection. |
+| The scenario includes an unrelated deployment and a healthy control service | Correlation must not blame the red herring, and detection must not flag the control. |
+| Synthetic data is labelled at the data level (`source=simulator`) | The label travels with the data into every chart, log view and, later, every AI prompt. |
+| The simulator's API key comes from an environment variable | Command-line arguments are visible to other users on the machine. |
+
+Verified:
+- on the Docker stack: a simulator run stored 3 metric batches, 1 log batch and 1 deployment batch; a second run over the same period was answered as 5 replays with nothing republished
+- in a real browser against the emulator: the service page shows the latency rise starting at the 2.43.0 deployment marker with the error logs beneath it; the deployments page lists the cause and the red herring; a 390px layout has no horizontal overflow; no failed requests or page errors
+
+A mistake during verification, recorded so it isn't repeated: the first browser run reached a dev server already running on port 5173 that was configured for the real Firebase project, and attempted a sign-up there. Test runs now use their own ports and refuse to start unless the served app is in emulator mode.
+
+---
+
+## 19. Slice 5 (anomaly detection): implementation record
+
+The *Detect* stage: the system now notices abnormal metric behaviour by itself.
+
+- **`detection/detectors.py`:** pure detectors (robust z-score, EWMA, static threshold).
+- **`detection/engine.py`:** pure logic turning point-by-point judgments into anomalies that open, extend and close.
+- **`detection/service.py`:** rebuilds the engine's state from PostgreSQL, runs it on the points stored since the last evaluation, and writes the result.
+- **`detection/consumer.py`:** runs the service for each "metrics stored" event (consumer group `detection`).
+- **`detection/evaluation.py`:** labelled synthetic scenarios and scoring, behind `ii eval detection`.
+- **Migration `0005`:** `anomalies` and `detection_state`.
+- **API and web app:** anomalies list, chart shading.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Detection consumes a "metrics stored" event, not the raw metrics topic (a change from §6) | Reading the raw stream, detection could run before the storage consumer had written the data it needs (history, and the series row an anomaly points to). The event is published after the storage commit, and also for a redelivered batch, so detection always sees stored data and no batch goes unannounced. |
+| Detector state lives in PostgreSQL, not Redis (a change from §6) | The baseline window is one indexed query per series per event. No measured need for Redis yet, and one store keeps detection deterministic and testable. Revisit if the query cost shows up. |
+| The engine's state is defined so it can be rebuilt from stored rows | Evaluating a series in many small steps must give the same anomalies as one pass. A test asserts this equivalence on four scenarios. |
+| A per-series "evaluated through" position | Makes detection idempotent under redelivery. The cost is that late points are not evaluated. |
+| The baseline excludes points inside anomalies, and is frozen while one is open | Otherwise a sustained problem contaminates the baseline and the anomaly "ends" while things are still broken. |
+| An anomaly open for 6 hours closes as "persisted" and the baseline restarts | A level that never returns is eventually the new normal. Without this a legitimate permanent change would stay flagged forever. |
+| Two anomalous points in a row to open | Single-point glitches are common and not actionable. It costs one sampling interval of detection delay. |
+| Default: robust z-score at threshold 6 | Chosen from the evaluation: the best recall of the candidates with no false positives. Threshold 4 raised a false alarm on the slow wave. |
+| Severity is a rule on the score; the API and UI say it is not a probability | CLAUDE.md: no calibrated-looking confidence without calibration. The PRD's `confidence = 0.94` is not reproduced. |
+| The static threshold exists only in the evaluation | It is the simple-rule baseline the statistical detectors must beat. User-configured thresholds need a rules model and UI, deferred. |
+| One Kafka partition per project serializes a project's detection | Events are keyed by project, so two consumers never evaluate the same series at once. A partial unique index (one open anomaly per series and detector) is the backstop. |
+
+Verified:
+- on the Docker stack, with the simulator: all 7 degrading series were flagged within 30 seconds of the 2.43.0 deployment (the downstream service about 2 minutes later, as designed), the healthy control service was not flagged, and re-running the simulator created no duplicate anomalies
+- in a real browser against the emulator: the Anomalies page lists the seven with their evidence; the latency chart is shaded from the deployment marker onward; the control service's chart has no shading; no failed requests or page errors
+
+Evaluation results at implementation (synthetic scenarios only): robust z-score 10/11 problems found with 0 false positives; static 2× rule 9/11; EWMA 8/11. The default misses the gradual drift.
+
+---
+
+## 20. Slice 6 (incidents): implementation record
+
+The *Correlate* stage: related anomalies become one incident, with an explainable timeline.
+
+- **`incidents/rules.py`:** the pure grouping rules.
+- **`incidents/service.py`:** applies them against PostgreSQL inside the detection transaction; records the timeline; links candidate deployments; resolves, reopens and merges.
+- **`incidents/dependencies.py`:** declared service dependencies (replace-all, written directly to PostgreSQL).
+- **Migration `0006`:** `incidents`, `incident_events`, `incident_deployments`, `service_dependencies`, and `anomalies.incident_id`.
+- **API and web app:** incident list and detail; dependency endpoints.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Grouping runs in the detection consumer's transaction | An anomaly and its place in an incident commit together, and detection's idempotency (the per-series position) covers grouping too. |
+| Rule: within 15 minutes, and same service or one direct dependency | As planned in §6. Explainable, and narrow enough not to merge unrelated problems that happen to coincide. |
+| Incidents merge when one anomaly relates to two | Anomalies don't arrive in dependency order. Without merging, a problem whose middle service is detected last would stay split in two. |
+| A resolved incident can be reopened for one window | A problem that recovers briefly and returns is one incident, not two. |
+| Candidate deployments are limited to services already in the incident | The scenario's unrelated deployment must not be linked. The link is recorded as a candidate with the rule that linked it. |
+| Statuses are `open`, `resolved`, `merged` only | These are what the system can determine by itself. Human workflow states (acknowledged, false positive) belong with feedback. |
+| Timeline entries carry a sequence number | Several anomalies are detected in the same instant; ordering by time alone showed the reasons out of order. Found on the Docker run. |
+| Dependencies are declared, not inferred | Inference needs traces, which aren't ingested yet. Declaring is replace-all so it is idempotent. |
+| The incident page has a "Not yet known" section | CLAUDE.md: distinguish observed facts, hypotheses and unknowns. Grouping establishes neither cause nor direction. |
+| The landing page is now Incidents | The product is incident-centred. |
+
+Verified:
+- on the Docker stack, with the simulator: the seven anomalies became one incident across three services; the only candidate deployment is `payment-api 2.43.0`; the unrelated `inventory-api` deployment is not linked; the timeline gives the rule for each anomaly, in order
+- in a real browser against the emulator: the incident list and detail page on desktop and at 390px, light and dark, with no horizontal overflow, failed requests or page errors
+
+---
+
+## 21. Slice 7 (AI investigation): implementation record
+
+The *Investigate* and *Explain* stages: a cited, checked analysis of an incident.
+
+- **`investigation/evidence.py`:** deterministic evidence collection and snapshots.
+- **`investigation/llm.py`:** provider interface; Gemini over its REST API with `httpx`; a disabled provider when no key is set.
+- **`investigation/prompts.py`:** the two system prompts and the delimited data blocks; `PROMPT_VERSION`.
+- **`investigation/validation.py`:** the pure checks on model output.
+- **`investigation/orchestrator.py`:** the fixed five-step run, each step recorded.
+- **`investigation/service.py`, `worker.py`:** queue and worker (`ii work`).
+- **Migration `0007`:** `investigations`, `investigation_evidence`, `investigation_steps`.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Gemini instead of Ollama (changes D7) | The user's choice: much better reasoning than a model that fits in 6 GB of GPU memory. The cost is that evidence leaves the machine. All data is synthetic for now. Ollama stays planned behind the same interface. |
+| Gemini is called over REST with `httpx`, without an SDK | `httpx` is already a dependency, and the call is one endpoint. |
+| The reply format is described in the prompt and checked with Pydantic, not enforced by a provider-specific schema feature | Works the same for any provider. One correction attempt handles malformed replies. |
+| The `investigations` table is also the queue (`FOR UPDATE SKIP LOCKED`, lease, attempts), instead of a generic `jobs` table (changes D9) | There is one kind of job. A generic table can come when there is a second. |
+| Citations are checked in code and stored in the report JSON, instead of `report_claims` and `claim_evidence` tables (changes §4) | The check gives the same guarantee with far less schema. Normalized claims can be added when feedback needs to attach to individual claims. |
+| Investigations are started by a person | Cost and rate limits are under the user's control, and an incident that just opened has little evidence yet. |
+| Only the worker receives the LLM key | Least privilege, as with the API-key pepper. |
+| Step records hold counts and outcomes, not prompts or replies | Enough to audit a run. The evidence snapshot already records what the model saw, and prompts are versioned in code. |
+| Verification can lower an assessment but never raise it | A second model call shouldn't be able to make a weakly supported claim look stronger. |
+| `<` is escaped in the data blocks | Found by a test: JSON quoting alone let a log line contain the literal closing tag. |
+
+Verified:
+- by tests with a scripted model (see README)
+- end to end with the real worker and Gemini client against a stand-in HTTP server returning a canned reply, in a real browser: the uncited fact and an invented reference were removed and listed, the second check overturned one hypothesis, citations open their evidence, and the page works at 390px
+
+Verified against the real Gemini API, once a key was available (the simulated payment incident, 15 evidence items):
+- `gemini-3.5-flash` produced a report in about 105 s (7,405 input and 1,122 output tokens, one provider retry). Its one hypothesis, marked supported, matches the cause the simulator plants: version 2.43.0's query on `customer_ref` causing sequential scans, pool exhaustion and cascading errors. All 8 facts cited real evidence; the checks changed nothing; the second check returned "holds".
+- `gemini-3.8-flash` answered 503 "high demand" on all four tries, and the investigation failed with that message, as designed.
+- The first report's summary stated the cause as established. Prompt version 2 tells the model to write "the evidence suggests"; a second real run did.
+- This is one scenario, which the model could solve largely from the log text. It is not an evaluation.
+
+---
+
+## 22. Slice 8 (feedback, learning, evaluation): implementation record
+
+The *Learn* stage, and the means to measure the *Investigate* stage.
+
+- **`learning/service.py`:** feedback (one per person per investigation, revisable), the learning record it creates or updates, evaluation cases.
+- **`learning/evaluation.py`:** `EvalCase`, the rule-based `judge`, the runner, five built-in cases.
+- **`investigation/orchestrator.py`:** the model-facing steps were extracted into a database-free `ReportWriter`, so the evaluation runs exactly the steps an investigation runs.
+- **Migration `0008`:** `investigation_feedback`, `learning_records`, `evaluation_cases`.
+- **Web app:** feedback form under a report; Learning page.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| A learning record is created by feedback, not by incident resolution | A record without a human judgment has nothing to learn from. |
+| The record snapshots evidence, report, model and prompt version | It must stay usable after telemetry retention deletes the originals, and comparable across prompt versions. |
+| The judge is rule-based, not an LLM | Deterministic, free, and can't share the judged model's blind spots. The cost is bluntness; an LLM judge can be added as a separate, labelled signal. |
+| Verdict counts are shown as counts with a caveat, not as "RCA accuracy" | They cover only reports someone chose to review, so a percentage would look more meaningful than it is. |
+| "Could not run" is separate from "failed" | A quota error or outage is not a wrong answer. Found on the first real run. |
+| Evaluation is an explicit command, never part of `make check` | It calls the real model: slow, costs quota, and not deterministic. |
+| Saved cases need explicit rules from an admin | Free-text "actual cause" can't be judged automatically. |
+| Each built-in case is tested to be failable | A case no report can fail measures nothing. |
+
+Verified:
+- by tests: feedback rules and permissions, the learning record's contents, saving and loading a case, the judge, the runner with a scripted model
+- in a real browser against the emulator (with the Gemini stand-in): giving feedback, and the Learning page
+- against real Gemini (`gemini-3.5-flash`, prompt version 2): 3 passed, 0 failed, 2 could not run (429 quota exceeded). Two of the three passes needed one citation correction each. The prompt-injection case has not been run against a real model.

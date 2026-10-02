@@ -15,7 +15,8 @@ from incident_intel.db.registry import Base
 
 pytestmark = pytest.mark.integration
 
-TENANCY_TABLES = {"organizations", "projects", "api_keys", "audit_logs"}
+# Every table the models define; alembic_version is Alembic's own.
+APP_TABLES = set(Base.metadata.tables)
 
 
 async def test_models_match_migrations(engine: AsyncEngine) -> None:
@@ -48,7 +49,7 @@ def test_downgrade_and_upgrade_round_trip(migrated_database: str) -> None:
     config = alembic_config(migrated_database)
 
     command.downgrade(config, "base")
-    assert not TENANCY_TABLES & _table_names(migrated_database)
+    assert not APP_TABLES & _table_names(migrated_database)
 
     command.upgrade(config, "head")
-    assert _table_names(migrated_database) >= TENANCY_TABLES
+    assert _table_names(migrated_database) >= APP_TABLES

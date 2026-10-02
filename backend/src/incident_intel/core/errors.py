@@ -9,6 +9,7 @@ import structlog
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import InterfaceError, OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = structlog.get_logger(__name__)
@@ -19,14 +20,23 @@ class AppError(Exception):
     code = "internal_error"
     default_message = "Internal server error."
 
-    def __init__(self, message: str | None = None) -> None:
+    def __init__(
+        self, message: str | None = None, *, details: list[dict[str, Any]] | None = None
+    ) -> None:
         self.message = message or self.default_message
+        # Structured, client-safe specifics (for example which batch item failed).
+        self.details = details
         super().__init__(self.message)
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {}
 
 
 class InvalidInputError(AppError):
     status_code = 422
-    code = "invalid_input"
+    # Same code as request-schema failures: clients handle one kind of 422.
+    code = "validation_error"
     default_message = "The request is invalid."
 
 
@@ -42,6 +52,16 @@ class AuthenticationError(AppError):
         self.reason = reason
         super().__init__()
 
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"WWW-Authenticate": "Bearer"}
+
+
+class PermissionDeniedError(AppError):
+    status_code = 403
+    code = "forbidden"
+    default_message = "The credentials do not permit this operation."
+
 
 class NotFoundError(AppError):
     status_code = 404
@@ -53,6 +73,41 @@ class ConflictError(AppError):
     status_code = 409
     code = "conflict"
     default_message = "The resource conflicts with existing state."
+
+
+class IdempotencyKeyReusedError(ConflictError):
+    code = "idempotency_conflict"
+    default_message = "This Idempotency-Key was already used with different data."
+
+
+class RateLimitedError(AppError):
+    status_code = 429
+    code = "rate_limited"
+    default_message = "Too many requests. Retry later."
+
+    def __init__(self, *, retry_after_seconds: int) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__()
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"Retry-After": str(self.retry_after_seconds)}
+
+
+class ServiceUnavailableError(AppError):
+    """A dependency is temporarily unavailable; the client should retry later."""
+
+    status_code = 503
+    code = "service_unavailable"
+    default_message = "Temporarily unavailable. Retry later."
+
+    def __init__(self, message: str | None = None, *, retry_after_seconds: int = 5) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(message)
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {"Retry-After": str(self.retry_after_seconds)}
 
 
 _HTTP_CODES = {
@@ -81,11 +136,11 @@ def error_body(code: str, message: str, **extra: Any) -> dict[str, Any]:
 
 async def _handle_app_error(_request: Request, raised: Exception) -> JSONResponse:
     exc = cast(AppError, raised)
-    headers: dict[str, str] = {}
-    if isinstance(exc, AuthenticationError):
-        headers["WWW-Authenticate"] = "Bearer"
+    extra = {"details": exc.details} if exc.details is not None else {}
     return JSONResponse(
-        error_body(exc.code, exc.message), status_code=exc.status_code, headers=headers
+        error_body(exc.code, exc.message, **extra),
+        status_code=exc.status_code,
+        headers=exc.headers,
     )
 
 
@@ -113,13 +168,29 @@ async def _handle_http_exception(_request: Request, raised: Exception) -> JSONRe
     )
 
 
-async def _handle_unexpected(_request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("unhandled_exception", error_type=type(exc).__name__)
-    return JSONResponse(error_body("internal_error", "Internal server error."), status_code=500)
+# Failures to reach a backing service (PostgreSQL): network errors surface as raw OSError
+# (refused, DNS, timeout) at connect time, and as SQLAlchemy errors on a broken connection.
+DEPENDENCY_ERRORS: tuple[type[Exception], ...] = (OSError, OperationalError, InterfaceError)
+
+
+async def _handle_dependency_unavailable(_request: Request, exc: Exception) -> JSONResponse:
+    logger.warning("dependency_unavailable", error_type=type(exc).__name__)
+    unavailable = ServiceUnavailableError()
+    return JSONResponse(
+        error_body(unavailable.code, unavailable.message),
+        status_code=unavailable.status_code,
+        headers=unavailable.headers,
+    )
 
 
 def install_exception_handlers(app: FastAPI) -> None:
+    """Register handlers for expected errors.
+
+    Anything else is caught by ``RequestContextMiddleware``, which answers 500 with the
+    request id and logs the traceback.
+    """
     app.add_exception_handler(AppError, _handle_app_error)
     app.add_exception_handler(RequestValidationError, _handle_validation_error)
     app.add_exception_handler(StarletteHTTPException, _handle_http_exception)
-    app.add_exception_handler(Exception, _handle_unexpected)
+    for error_type in DEPENDENCY_ERRORS:
+        app.add_exception_handler(error_type, _handle_dependency_unavailable)
