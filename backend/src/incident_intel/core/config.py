@@ -117,6 +117,8 @@ class Settings(RuntimeSettings):
     firebase_auth_emulator_host: str | None = None
     # Abuse limit for self-service sign-up.
     max_owned_organizations_per_user: int = Field(default=10, ge=1)
+    # Each investigation calls an LLM: cap how many one incident can get per hour.
+    investigations_per_incident_per_hour: int = Field(default=6, ge=1)
 
     @field_validator("firebase_project_id", "firebase_auth_emulator_host", mode="before")
     @classmethod

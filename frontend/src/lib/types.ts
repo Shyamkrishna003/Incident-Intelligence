@@ -190,6 +190,61 @@ export interface IncidentDetail extends Incident {
   dependencies: Dependency[];
 }
 
+export type Assessment = "supported" | "weak" | "untested" | "contradicted";
+
+export interface ReportFact {
+  statement: string;
+  evidence: string[];
+}
+
+export interface ReportHypothesis {
+  statement: string;
+  /** How well the evidence supports it. A word, never a probability. */
+  assessment: Assessment;
+  supporting_evidence: string[];
+  contradicting_evidence: string[];
+  reasoning: string;
+  review: string | null;
+}
+
+export interface InvestigationReport {
+  summary: string;
+  observed_facts: ReportFact[];
+  hypotheses: ReportHypothesis[];
+  unknowns: string[];
+  next_steps: { action: string; expected_evidence: string }[];
+}
+
+export interface Investigation {
+  id: string;
+  incident_id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  provider: string | null;
+  model: string | null;
+  prompt_version: string | null;
+  error: string | null;
+}
+
+export interface EvidenceItem {
+  ref: string;
+  kind: string;
+  title: string;
+  /** Exactly what the model was shown. */
+  data: Record<string, unknown>;
+}
+
+export interface InvestigationDetail extends Investigation {
+  report: InvestigationReport | null;
+  validation_notes: string[];
+  evidence: EvidenceItem[];
+  steps: { kind: string; status: string; duration_ms: number; error: string | null }[];
+  input_tokens: number;
+  output_tokens: number;
+}
+
 export type ApiKeyScope = "ingest:write" | "telemetry:read";
 
 export interface ApiKey {

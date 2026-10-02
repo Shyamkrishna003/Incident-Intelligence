@@ -149,6 +149,22 @@ services:
       kafka-init:
         condition: service_completed_successfully
 
+  # Runs queued AI investigations. The only container that receives the LLM API key.
+  # Without a key it still runs, and investigations fail with a clear message.
+  investigation-worker:
+    build: ./backend
+    command: ["ii", "work"]
+    environment:
+      <<: *backend-env
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+    restart: unless-stopped
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   # Optional: local stand-in for Firebase Authentication (`make emulator`). Started only
   # with the "emulator" profile, so `make up` does not need this large image.
   firebase-emulator:

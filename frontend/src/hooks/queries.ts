@@ -150,6 +150,38 @@ export function useIncident(projectId: string, incidentId: string) {
   });
 }
 
+const isActive = (status: string | undefined) => status === "queued" || status === "running";
+
+/** The newest investigation of an incident, polled while it is in progress. */
+export function useLatestInvestigation(projectId: string, incidentId: string) {
+  const uid = useUid();
+  const list = useQuery({
+    queryKey: [uid, "investigations", projectId, incidentId],
+    queryFn: () => api.listInvestigations(projectId, incidentId),
+    select: (data) => data.investigations[0] ?? null,
+    staleTime: 0,
+    refetchInterval: (query) =>
+      isActive(query.state.data?.investigations[0]?.status) ? 3_000 : false,
+  });
+  const latest = list.data ?? null;
+  const detail = useQuery({
+    queryKey: [uid, "investigation", projectId, latest?.id, latest?.status],
+    queryFn: () => api.getInvestigation(projectId, latest?.id ?? ""),
+    enabled: latest !== null && !isActive(latest.status),
+  });
+  return { list, latest, detail };
+}
+
+export function useRequestInvestigation(projectId: string, incidentId: string) {
+  const uid = useUid();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.requestInvestigation(projectId, incidentId),
+    onSettled: () =>
+      queryClient.invalidateQueries({ queryKey: [uid, "investigations", projectId, incidentId] }),
+  });
+}
+
 export function useApiKeys(projectId: string, enabled: boolean) {
   const uid = useUid();
   return useQuery({

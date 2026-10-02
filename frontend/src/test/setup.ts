@@ -17,3 +17,6 @@ class ResizeObserverStub {
   disconnect(): void {}
 }
 globalThis.ResizeObserver = ResizeObserverStub;
+
+// jsdom does not implement scrolling.
+Element.prototype.scrollIntoView = () => undefined;

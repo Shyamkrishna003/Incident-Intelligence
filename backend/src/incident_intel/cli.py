@@ -33,6 +33,8 @@ from incident_intel.db.session import create_engine, create_session_factory
 from incident_intel.detection.consumer import run_detection_consumer
 from incident_intel.detection.evaluation import candidates, evaluate, format_report
 from incident_intel.detection.service import DetectionSettings
+from incident_intel.investigation.llm import WorkerSettings
+from incident_intel.investigation.worker import run_worker
 from incident_intel.simulator.client import IngestClient, SimulatorError, build_http_client
 from incident_intel.simulator.runner import SimulationPlan, run_simulation
 from incident_intel.streaming.admin import ensure_topics, read_topic_from_start
@@ -96,6 +98,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     consume = commands.add_parser("consume", help="Run a long-lived consumer until SIGTERM")
     consume.add_argument("consumer", choices=["storage", "detection"])
+
+    commands.add_parser("work", help="Run the investigation worker until SIGTERM")
 
     evaluation = commands.add_parser("eval", help="Score detectors on labelled scenarios")
     evaluation.add_argument("suite", choices=["detection"])
@@ -301,6 +305,15 @@ async def _simulate(args: argparse.Namespace) -> None:
     )
 
 
+async def _work() -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop.set)
+    # Loaded here only: the worker is the one process that holds the LLM API key.
+    await run_worker(WorkerSettings(), stop)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     settings: RuntimeSettings = (
@@ -314,6 +327,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             _kafka_init(settings)
         elif args.command == "consume":
             asyncio.run(_consume(settings, args.consumer))
+        elif args.command == "work":
+            asyncio.run(_work())
         elif args.command == "eval":
             _eval_detection(settings)
         elif args.command == "dlq":

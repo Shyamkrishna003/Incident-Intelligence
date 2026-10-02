@@ -41,6 +41,10 @@ _SECRET_PATTERNS = (
     re.compile(r"ii_[a-z0-9]{12}_[A-Za-z0-9_-]{20,}"),
     # Any bearer credential that ends up inside a message.
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
+    # Google API keys (for example the Gemini key).
+    re.compile(r"AIza[0-9A-Za-z_-]{30,}"),
+    # name=value or name: value where the name says the value is a secret.
+    re.compile(r"(?i)(?<=\b)(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*\S+"),
 )
 
 _MAX_DEPTH = 8
@@ -63,6 +67,14 @@ def _scrub(value: Any, depth: int = 0) -> Any:
     if isinstance(value, list | tuple):
         return type(value)(_scrub(item, depth + 1) for item in value)
     return value
+
+
+def scrub_text(text: str) -> str:
+    """Redact secret-looking values inside free text (also used before text from
+    monitored systems is sent to an LLM)."""
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub(REDACTED, text)
+    return text
 
 
 def redact_sensitive(_logger: WrappedLogger, _method: str, event_dict: EventDict) -> EventDict:

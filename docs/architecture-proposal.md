@@ -714,3 +714,38 @@ Decisions made during implementation:
 Verified:
 - on the Docker stack, with the simulator: the seven anomalies became one incident across three services; the only candidate deployment is `payment-api 2.43.0`; the unrelated `inventory-api` deployment is not linked; the timeline gives the rule for each anomaly, in order
 - in a real browser against the emulator: the incident list and detail page on desktop and at 390px, light and dark, with no horizontal overflow, failed requests or page errors
+
+---
+
+## 21. Slice 7 (AI investigation): implementation record
+
+The *Investigate* and *Explain* stages: a cited, checked analysis of an incident.
+
+- **`investigation/evidence.py`:** deterministic evidence collection and snapshots.
+- **`investigation/llm.py`:** provider interface; Gemini over its REST API with `httpx`; a disabled provider when no key is set.
+- **`investigation/prompts.py`:** the two system prompts and the delimited data blocks; `PROMPT_VERSION`.
+- **`investigation/validation.py`:** the pure checks on model output.
+- **`investigation/orchestrator.py`:** the fixed five-step run, each step recorded.
+- **`investigation/service.py`, `worker.py`:** queue and worker (`ii work`).
+- **Migration `0007`:** `investigations`, `investigation_evidence`, `investigation_steps`.
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Gemini instead of Ollama (changes D7) | The user's choice: much better reasoning than a model that fits in 6 GB of GPU memory. The cost is that evidence leaves the machine. All data is synthetic for now. Ollama stays planned behind the same interface. |
+| Gemini is called over REST with `httpx`, without an SDK | `httpx` is already a dependency, and the call is one endpoint. |
+| The reply format is described in the prompt and checked with Pydantic, not enforced by a provider-specific schema feature | Works the same for any provider. One correction attempt handles malformed replies. |
+| The `investigations` table is also the queue (`FOR UPDATE SKIP LOCKED`, lease, attempts), instead of a generic `jobs` table (changes D9) | There is one kind of job. A generic table can come when there is a second. |
+| Citations are checked in code and stored in the report JSON, instead of `report_claims` and `claim_evidence` tables (changes §4) | The check gives the same guarantee with far less schema. Normalized claims can be added when feedback needs to attach to individual claims. |
+| Investigations are started by a person | Cost and rate limits are under the user's control, and an incident that just opened has little evidence yet. |
+| Only the worker receives the LLM key | Least privilege, as with the API-key pepper. |
+| Step records hold counts and outcomes, not prompts or replies | Enough to audit a run. The evidence snapshot already records what the model saw, and prompts are versioned in code. |
+| Verification can lower an assessment but never raise it | A second model call shouldn't be able to make a weakly supported claim look stronger. |
+| `<` is escaped in the data blocks | Found by a test: JSON quoting alone let a log line contain the literal closing tag. |
+
+Verified:
+- by tests with a scripted model (see README)
+- end to end with the real worker and Gemini client against a stand-in HTTP server returning a canned reply, in a real browser: the uncited fact and an invented reference were removed and listed, the second check overturned one hypothesis, citations open their evidence, and the page works at 390px
+
+Not verified: any call to the real Gemini API (no key was available).

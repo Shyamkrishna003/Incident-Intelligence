@@ -8,6 +8,8 @@ import type {
   DeploymentList,
   IncidentDetail,
   IncidentList,
+  Investigation,
+  InvestigationDetail,
   LogList,
   Me,
   Metric,
@@ -213,6 +215,22 @@ export const api = {
 
   getIncident: (projectId: string, incidentId: string) =>
     request<IncidentDetail>(`/v1/projects/${seg(projectId)}/incidents/${seg(incidentId)}`),
+
+  requestInvestigation: (projectId: string, incidentId: string) =>
+    request<Investigation>(
+      `/v1/projects/${seg(projectId)}/incidents/${seg(incidentId)}/investigations`,
+      { method: "POST" },
+    ),
+
+  listInvestigations: (projectId: string, incidentId: string) =>
+    request<{ investigations: Investigation[] }>(
+      `/v1/projects/${seg(projectId)}/incidents/${seg(incidentId)}/investigations`,
+    ),
+
+  getInvestigation: (projectId: string, investigationId: string) =>
+    request<InvestigationDetail>(
+      `/v1/projects/${seg(projectId)}/investigations/${seg(investigationId)}`,
+    ),
 
   listApiKeys: (projectId: string) =>
     request<{ api_keys: ApiKey[] }>(`/v1/projects/${seg(projectId)}/api-keys`),

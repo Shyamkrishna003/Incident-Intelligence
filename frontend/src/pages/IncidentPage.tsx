@@ -1,11 +1,13 @@
 import { Link, useParams } from "react-router-dom";
 
 import type { ProjectContext } from "../components/AppShell";
+import { InvestigationPanel } from "../components/InvestigationPanel";
 import { Card, ErrorState, LoadingState } from "../components/ui";
 import { useIncident } from "../hooks/queries";
 import { formatDateTime, formatDuration, formatValue, seriesLabel } from "../lib/format";
 import { describeEvent } from "../lib/timeline";
 import type { IncidentDetail } from "../lib/types";
+import { roleAtLeast } from "../lib/types";
 import { IncidentStatus, incidentDuration } from "./IncidentsPage";
 
 export function IncidentPage({ current }: { current: ProjectContext }) {
@@ -29,7 +31,12 @@ export function IncidentPage({ current }: { current: ProjectContext }) {
           onRetry={() => void incident.refetch()}
         />
       ) : (
-        <IncidentView incident={incident.data} base={base} />
+        <IncidentView
+          incident={incident.data}
+          base={base}
+          projectId={current.project.id}
+          canInvestigate={roleAtLeast(current.organization.role, "member")}
+        />
       )}
     </>
   );
@@ -44,7 +51,17 @@ function Fact({ label, children }: { label: string; children: React.ReactNode })
   );
 }
 
-function IncidentView({ incident, base }: { incident: IncidentDetail; base: string }) {
+function IncidentView({
+  incident,
+  base,
+  projectId,
+  canInvestigate,
+}: {
+  incident: IncidentDetail;
+  base: string;
+  projectId: string;
+  canInvestigate: boolean;
+}) {
   return (
     <>
       <h1 className="text-xl font-semibold text-ink">{incident.title}</h1>
@@ -172,11 +189,20 @@ function IncidentView({ incident, base }: { incident: IncidentDetail; base: stri
         )}
       </Card>
 
+      {incident.status !== "merged" && (
+        <InvestigationPanel
+          projectId={projectId}
+          incidentId={incident.id}
+          canInvestigate={canInvestigate}
+        />
+      )}
+
       <Card className="mt-5">
         <h2 className="text-base font-semibold text-ink">Not yet known</h2>
         <p className="mt-1 text-sm text-ink">
-          The cause of this incident has not been determined. The grouping above is based on
-          timing and declared service dependencies; it does not show what caused what.
+          The cause of this incident has not been confirmed. The grouping above is based on
+          timing and declared service dependencies; it does not show what caused what. An AI
+          investigation offers hypotheses to check, not a confirmed cause.
         </p>
       </Card>
 

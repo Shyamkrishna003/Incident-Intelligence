@@ -10,7 +10,7 @@ AI-assisted incident detection, investigation, root-cause analysis, and reliabil
 
 ## Status
 
-Implemented through **slice 6: *Observe* (metrics, logs, deployments), *Detect* (anomaly detection) and *Correlate* (incidents), with sign-in for people, a web app, and a scenario simulator**:
+Implemented through **slice 7: *Observe*, *Detect*, *Correlate* and *Investigate* (AI-assisted, evidence-cited analysis), with sign-in for people, a web app, and a scenario simulator**:
 
 - **Foundation (slice 1):**
   - FastAPI backend with typed configuration, structured JSON logs (with secret redaction), and request IDs.
@@ -58,7 +58,13 @@ Implemented through **slice 6: *Observe* (metrics, logs, deployments), *Detect* 
   - An incident resolves when all its anomalies end, and reopens if a related one appears soon after.
   - The web app has an incident list and a detail page: what was observed, what changed, what isn't known, and the timeline.
 
-Next comes AI investigation: gathering this evidence and producing a structured, cited analysis. See the architecture doc, §11.
+- **AI investigation (slice 7):**
+  - On request, a worker collects a fixed set of evidence for an incident and asks an LLM (Gemini) for a structured report: observed facts, hypotheses, unknowns and suggested checks.
+  - Every statement must cite evidence. Code checks each citation and removes or downgrades what isn't backed.
+  - A second model call tries to disprove each hypothesis.
+  - The run, its steps and the exact evidence shown to the model are stored.
+
+Next come human feedback, learning records and evaluation of the investigations. See the architecture doc, §11.
 
 ## How ingestion works
 
@@ -193,6 +199,52 @@ curl -X PUT localhost:8000/v1/dependencies -H "Authorization: Bearer $KEY" \
 
 Without declared dependencies, anomalies on different services become separate incidents. The simulator declares its own.
 
+## AI investigation
+
+An investigation starts only when a member clicks **Investigate with AI** on an incident (or calls the API). It runs in the `investigation-worker`, outside any API request.
+
+```
+1. collect evidence   code only: the incident, its anomalies, deployments around it,
+                      declared dependencies, unaffected services, and warning/error log
+                      patterns of the affected services. Each item gets a reference (E1, E2, …)
+2. analyze            model call → draft report (one correction attempt if malformed)
+3. validate           code only: checks every citation
+4. verify             model call → tries to disprove each hypothesis
+5. store              the checked report, with what the checks changed
+```
+
+**What the model can and can't do.** It receives text and returns JSON. It has no tools: it can't query anything, fetch anything or act. There is no loop it controls.
+
+**What code enforces on the model's reply:**
+
+- A reference to evidence that doesn't exist is removed.
+- An "observed fact" with no valid citation is removed.
+- A hypothesis marked supported or weak without supporting evidence is shown as untested.
+- The second check can only lower an assessment, and "contradicted" counts only if it cites real evidence.
+- Everything removed or changed is listed with the report.
+
+**Assessments are words** (supported, weakly supported, untested, contradicted), never probabilities. The report is labelled as AI-written, and hypotheses as suggestions to verify.
+
+**Untrusted input.** Log messages and deployment descriptions come from monitored systems and may contain text that looks like instructions.
+- They are passed to the model as JSON data inside a delimited block, with `<` escaped so the data can't close the block.
+- The instructions tell the model to treat that block as data only.
+- This reduces the risk of prompt injection but can't remove it. Because the model has no tools, the worst outcome is a wrong report, which the citation checks and the human reader are there to catch.
+
+**Secrets.** Text from monitored systems is passed through the same redaction as application logs (API keys, bearer tokens, `password=...` and similar) and truncated before it is stored or sent. Redaction is pattern-based and won't catch every secret, so services still shouldn't log them.
+
+**Audit.** Each investigation records the provider, model, prompt version, token counts, every step (kind, duration, outcome) and a snapshot of each evidence item exactly as the model saw it. Prompts and raw replies are not stored.
+
+**Limits and failures:**
+
+- One investigation per incident at a time, and at most 6 per incident per hour.
+- A rate-limited or failing provider is retried with backoff (up to 4 tries per call), then the investigation fails with the provider's message.
+- A malformed reply gets one correction attempt, then the investigation fails. The collected evidence stays viewable.
+- If the second check fails, the report is kept and says the check didn't run.
+- If the worker dies mid-run, the investigation is retried once after 10 minutes, then failed.
+- Without `GEMINI_API_KEY`, investigations fail with a message saying so.
+
+**Data leaves your infrastructure.** The evidence for an incident is sent to Google's Gemini API. Check the data-use terms of your Gemini plan before using this with real telemetry.
+
 ## Scenario simulator
 
 `ii simulate` produces a synthetic incident modelled on the PRD's example and sends it through the real ingestion API, so detection and investigation can be built and evaluated without production data.
@@ -312,6 +364,7 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | Sign in | Email/password, Google or GitHub. If the email already belongs to an account with a different method, the app asks the user to sign in the original way and then links the new method. |
 | Setup | Shown until the user can reach a project. Asks for email verification first, then creates an organization and its first project. If setup was interrupted after the organization was created, it asks only for the project. |
 | Incidents | The landing page. Incidents in the last 7 days, ongoing first, with severity, affected services, duration and anomaly count. |
+| Incident (AI investigation) | Start an investigation, watch its progress, and read the report. Citations open the evidence they point to. Failures show the reason and a retry button. |
 | Incident | **What was observed** (each anomaly with its evidence and a link to its chart), **What changed** (candidate deployments, labelled as candidates), **Not yet known** (the cause), and the **Timeline** with the reason for each grouping decision. |
 | Services | The services that have sent telemetry to the selected project. Refreshes when opened and every 30 seconds. |
 | Service | Pick a metric and a time range (15 minutes to 24 hours). One line per series (attribute set), a legend, a hover readout of every series, and the same values as a table. Deployments of the service are marked on the chart, and periods with a detected anomaly are shaded. Below it, the service's logs for the same time range, filterable by severity and text. Refreshes every 30 seconds. |
@@ -354,6 +407,9 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | GET | `/v1/projects/{project_id}/deployments` | any member | Deployments, same parameters as the API-key endpoint |
 | GET | `/v1/projects/{project_id}/anomalies` | any member | Anomalies, same parameters as the API-key endpoint |
 | GET | `/v1/projects/{project_id}/incidents` and `.../incidents/{incident_id}` | any member | Incidents, same as the API-key endpoints |
+| POST | `/v1/projects/{project_id}/incidents/{incident_id}/investigations` | member, admin or owner | Queue an AI investigation. Returns **202**; **409** if one is already in progress; **429** over the hourly cap. |
+| GET | `/v1/projects/{project_id}/incidents/{incident_id}/investigations` | any member | The incident's investigations, newest first |
+| GET | `/v1/projects/{project_id}/investigations/{investigation_id}` | any member | One investigation: the checked report, what the checks changed, the evidence snapshots and the recorded steps |
 | GET | `/v1/projects/{project_id}/dependencies` | any member | Declared service dependencies |
 | PUT | `/v1/projects/{project_id}/dependencies` | admin or owner | Replace the declared dependencies |
 | GET | `/v1/services/{service}/metrics` | API key with `telemetry:read` | The metrics a service has reported, with the number of series each has. Also at `/v1/projects/{project_id}/services/{service}/metrics` for signed-in users. |
@@ -393,6 +449,7 @@ ii api-keys revoke --prefix <12-char prefix>
 ii kafka init                      # create missing topics (existing ones are left unchanged)
 ii consume storage                 # run the storage consumer until SIGTERM/SIGINT
 ii consume detection               # run the detection consumer
+ii work                            # run the investigation worker (holds the LLM API key)
 ii eval detection                  # score the detectors on labelled synthetic scenarios
 ii dlq inspect [--kind metrics|logs|deployments] [--limit 20] [--show-values]   # bodies hidden by default
 ii simulate [--live] [--no-incident] [--backfill-minutes 60] [--incident-after-minutes 45] [--seed 1]
@@ -434,6 +491,7 @@ ii simulate [--live] [--no-incident] [--backfill-minutes 60] [--incident-after-m
   - One test checks that evaluating a series a few points at a time through the database finds exactly the anomalies the pure engine finds in a single pass.
   - Another holds the default detector to its evaluated results.
 - **Incident grouping** is tested as pure rules and through the real detection handler against PostgreSQL: same service, dependency, the time window, merging, resolving and reopening, candidate deployments, timeline order, and isolation between projects.
+- **Investigations** are tested with a scripted fake model: the citation checks, the correction attempt, provider failures, hostile log text staying inside the data block, secret redaction, the queue's lease and retry, permissions and isolation. The Gemini client is tested against a stand-in HTTP server. No test calls a real model.
 - **Consumer delivery rules** (commit only after success, retry transient errors, dead-letter permanent ones) are unit-tested with an in-memory message source.
 
 ### Layout
@@ -451,6 +509,7 @@ backend/
     streaming/   Kafka: topics, async publisher, consumer loop with dead-lettering, admin
     ingestion/   ingestion API: schemas, normalization, publishing
     telemetry/   message contracts, models, idempotent storage consumer, read APIs
+    investigation/  evidence collection, LLM provider (Gemini), prompts, report checks, orchestrator, worker
     incidents/   grouping rules, incident lifecycle and timeline, service dependencies, incidents API
     detection/   detectors, anomaly engine, detection consumer, evaluation suite, anomalies API
     simulator/   synthetic incident scenario, sender, backfill and live runner
@@ -479,6 +538,7 @@ See [.env.example](.env.example).
 - `REDIS_URL` is `redis://localhost:6379/0` from the host. The API container uses `redis://redis:6379/0`, set in compose.
 - `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` set the per-key limit. `RATE_LIMIT_FAIL_OPEN`, `IDEMPOTENCY_TTL_SECONDS` and `API_KEY_CACHE_TTL_SECONDS` are optional.
 - `VITE_FIREBASE_*` configure the web app. They are public identifiers that ship in the browser bundle. Vite exposes only `VITE_`-prefixed variables to the browser, so the secrets in the same `.env` file stay out of it.
+- `GEMINI_API_KEY` is a **secret**. Only the investigation worker receives it. `GEMINI_MODEL` selects the model.
 - `FIREBASE_PROJECT_ID` enables sign-in for people. `FIREBASE_AUTH_EMULATOR_HOST` switches to the local emulator (never in production).
 - Real environment variables override `.env`, and `.env` is git-ignored. Never commit it.
 
@@ -500,6 +560,12 @@ See [.env.example](.env.example).
 - **Late metric points are not evaluated.** A point older than what its series has already been evaluated through is stored but skipped by detection.
 - **An anomaly on a series that stops reporting stays open** until a later point arrives.
 - **No user-configured thresholds or alert rules yet,** and no notifications. Anomalies are visible in the app and the API only.
+- **The real Gemini call has not been run yet.** Everything around it is tested, and the worker was run end to end against a stand-in for the Gemini API. The default model name (`gemini-2.5-flash`) is unverified and may need changing.
+- **Report quality is not evaluated yet.** The checks guarantee that citations are real, not that the reasoning is right. An evaluation suite for investigations is the next slice.
+- **Only Gemini is supported.** A local Ollama provider is planned.
+- **Evidence is a fixed set.** The model can't ask for more (for example a different time window), and no metric time series beyond each anomaly's summary is included.
+- **Investigations are manual.** None starts automatically when an incident opens.
+- **Only signed-in users can start or read investigations;** there are no API-key endpoints for them.
 - **Grouping depends on declared dependencies.** Without them, one problem spanning several services becomes several incidents. Dependencies aren't discovered from traces yet.
 - **Grouping has not been evaluated** against labelled cases the way detection has. It's verified on the simulated incident and by tests of each rule.
 - **No manual incident actions yet:** acknowledging, renaming, marking a false positive, merging or splitting by hand, and feedback all come with a later slice.

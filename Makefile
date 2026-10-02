@@ -5,7 +5,7 @@
 COMPOSE := docker compose
 VENV_BIN := ../.venv/bin
 
-.PHONY: help env venv lock db infra emulator kafka-init web-install web web-check simulate eval up down logs migrate run consume detect dlq bootstrap test test-unit lint fmt typecheck check
+.PHONY: help env venv lock db infra emulator kafka-init web-install web web-check simulate eval up down logs migrate run consume detect work dlq bootstrap test test-unit lint fmt typecheck check
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -49,7 +49,7 @@ down: ## Stop the stack (data volumes are kept)
 	$(COMPOSE) down
 
 logs: ## Follow API and storage-consumer logs
-	$(COMPOSE) logs -f api storage-consumer detection-consumer
+	$(COMPOSE) logs -f api storage-consumer detection-consumer investigation-worker
 
 migrate: venv ## Apply database migrations
 	cd backend && $(VENV_BIN)/alembic upgrade head
@@ -62,6 +62,9 @@ consume: venv ## Run the storage consumer on the host (Kafka -> PostgreSQL)
 
 detect: venv ## Run the detection consumer on the host (stored metrics -> anomalies)
 	cd backend && $(VENV_BIN)/ii consume detection
+
+work: venv ## Run the investigation worker on the host (needs GEMINI_API_KEY)
+	cd backend && $(VENV_BIN)/ii work
 
 eval: venv ## Score the detectors on labelled synthetic scenarios
 	cd backend && $(VENV_BIN)/ii eval detection

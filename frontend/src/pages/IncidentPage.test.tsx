@@ -1,6 +1,6 @@
 import { screen, within } from "@testing-library/react";
 import { Route, Routes } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { api } from "../lib/api";
 import { describeEvent } from "../lib/timeline";
@@ -93,6 +93,10 @@ function renderIncident() {
 }
 
 describe("IncidentPage", () => {
+  beforeEach(() => {
+    vi.spyOn(api, "listInvestigations").mockResolvedValue({ investigations: [] });
+  });
+
   it("separates what was observed, what changed, and what is not known", async () => {
     vi.spyOn(api, "getIncident").mockResolvedValue(detail);
     renderIncident();
@@ -116,7 +120,7 @@ describe("IncidentPage", () => {
     expect(changed).toHaveTextContent("30 s before the first anomaly");
 
     const unknown = screen.getByRole("heading", { name: "Not yet known" }).closest("section");
-    expect(unknown).toHaveTextContent("The cause of this incident has not been determined.");
+    expect(unknown).toHaveTextContent("The cause of this incident has not been confirmed.");
   });
 
   it("explains in the timeline why each anomaly was grouped", async () => {

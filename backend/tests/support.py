@@ -16,6 +16,7 @@ from incident_intel.cache.rate_limit import RateLimitDecision, window_position
 from incident_intel.cache.services import CacheServices
 from incident_intel.core.config import Settings
 from incident_intel.core.errors import AuthenticationError, ServiceUnavailableError
+from incident_intel.investigation.llm import LLMError, LLMResponse
 from incident_intel.streaming.producer import PublishError
 from incident_intel.telemetry.messages import (
     MetricBatchMessage,
@@ -189,6 +190,29 @@ class FakeTokenVerifier:
         if identity is None:
             raise AuthenticationError("invalid_token")
         return identity
+
+    async def close(self) -> None:
+        return None
+
+
+@dataclass
+class FakeLLM:
+    """A scripted model: returns the given replies in order and records what it was sent.
+    A reply can be text, or an LLMError to raise."""
+
+    replies: list[str | LLMError] = field(default_factory=list)
+    calls: list[tuple[str, str]] = field(default_factory=list)
+    name: str = "fake"
+    model: str = "fake-model"
+
+    async def generate_json(self, *, system: str, user: str) -> LLMResponse:
+        self.calls.append((system, user))
+        if not self.replies:
+            raise AssertionError("the model was called more often than the test scripted")
+        reply = self.replies.pop(0)
+        if isinstance(reply, LLMError):
+            raise reply
+        return LLMResponse(text=reply, input_tokens=100, output_tokens=20)
 
     async def close(self) -> None:
         return None
