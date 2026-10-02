@@ -61,6 +61,11 @@ def test_rendered_output_contains_no_secrets() -> None:
 
     output = stream.getvalue()
     assert key not in output
-    line = json.loads(output.strip().splitlines()[-1])
-    assert line["event"] == "auth attempt"
+    # Select our line by event: background threads (e.g. Kafka clients from other tests)
+    # may log to the same root handler, so "the last line" is not necessarily ours.
+    [line] = [
+        parsed
+        for parsed in (json.loads(raw) for raw in output.splitlines() if raw.strip())
+        if parsed.get("event") == "auth attempt"
+    ]
     assert line["authorization"] == REDACTED

@@ -13,19 +13,27 @@ from incident_intel.api import health
 from incident_intel.core.config import Settings, get_settings
 from incident_intel.core.errors import install_exception_handlers
 from incident_intel.core.logging import configure_logging
-from incident_intel.core.middleware import RequestContextMiddleware
+from incident_intel.core.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
 from incident_intel.db.migrations import head_revision
 from incident_intel.db.session import create_engine, create_session_factory
+from incident_intel.ingestion.router import router as ingestion_router
+from incident_intel.streaming.producer import KafkaPublisher, MessagePublisher
+from incident_intel.streaming.topics import METRICS, topic_name
+from incident_intel.telemetry.router import router as telemetry_router
 from incident_intel.tenancy.router import router as tenancy_router
 
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
+    await app.state.publisher.close()
     await app.state.engine.dispose()
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None, *, publisher: MessagePublisher | None = None
+) -> FastAPI:
+    """Build the API. ``publisher`` can be injected (tests); by default Kafka is used."""
     settings = settings or get_settings()
     configure_logging(level=settings.log_level, json=settings.log_json)
 
@@ -39,16 +47,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if expose_docs else None,
     )
 
-    # The engine connects lazily, so creating it here does not require a live database.
+    # Neither the engine nor the producer needs its backend to be up at construction time.
     engine = create_engine(settings)
     app.state.settings = settings
     app.state.engine = engine
     app.state.session_factory = create_session_factory(engine)
     app.state.expected_migration_head = head_revision()
+    app.state.publisher = publisher or KafkaPublisher(
+        settings, delivery_timeout_seconds=settings.kafka_produce_timeout_seconds
+    )
+    app.state.metrics_topic = topic_name(settings, METRICS)
 
     install_exception_handlers(app)
+    # Starlette runs the last-added middleware first: request context wraps everything,
+    # so even a 413 from the body limit carries a request id and gets logged.
+    app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
     app.add_middleware(RequestContextMiddleware)
 
     app.include_router(health.router)
     app.include_router(tenancy_router)
+    app.include_router(ingestion_router)
+    app.include_router(telemetry_router)
     return app

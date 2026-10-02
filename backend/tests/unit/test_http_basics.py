@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from incident_intel.main import create_app
-from tests.support import make_settings
+from tests.support import FakePublisher, make_settings
 
 # Nothing listens on port 1, so connections are refused immediately.
 UNREACHABLE_DB = "postgresql+asyncpg://user:pw@127.0.0.1:1/unreachable_test"
@@ -15,7 +15,9 @@ UNREACHABLE_DB = "postgresql+asyncpg://user:pw@127.0.0.1:1/unreachable_test"
 
 @pytest.fixture
 async def offline_app() -> AsyncIterator[FastAPI]:
-    app = create_app(make_settings(UNREACHABLE_DB, readiness_timeout_seconds=2.0))
+    app = create_app(
+        make_settings(UNREACHABLE_DB, readiness_timeout_seconds=2.0), publisher=FakePublisher()
+    )
     yield app
     await app.state.engine.dispose()
 
@@ -40,7 +42,7 @@ async def test_readyz_reports_unavailable_database(offline_client: AsyncClient) 
     assert response.status_code == 503
     assert response.json() == {
         "status": "not_ready",
-        "checks": {"database": "unavailable", "migrations": "unknown"},
+        "checks": {"database": "unavailable", "migrations": "unknown", "kafka": "ok"},
     }
 
 
@@ -79,3 +81,38 @@ async def test_protected_route_without_credentials_needs_no_database(
 
     assert response.status_code == 401
     assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+async def test_database_outage_during_auth_is_a_retryable_503(
+    offline_client: AsyncClient,
+) -> None:
+    well_formed_key = "ii_abcdefghijkl_" + "a" * 43
+
+    response = await offline_client.get(
+        "/v1/project", headers={"Authorization": f"Bearer {well_formed_key}"}
+    )
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "5"
+    body = response.json()
+    assert body["error"]["code"] == "service_unavailable"
+    assert body["error"]["request_id"] == response.headers["X-Request-ID"]
+
+
+async def test_unexpected_errors_are_500_with_request_id(offline_app: FastAPI) -> None:
+    async def boom() -> None:
+        raise RuntimeError("bug")
+
+    offline_app.add_api_route("/boom", boom)
+    transport = ASGITransport(app=offline_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as http:
+        response = await http.get("/boom")
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["error"] == {
+        "code": "internal_error",
+        "message": "Internal server error.",
+        "request_id": response.headers["X-Request-ID"],
+    }
+    assert "bug" not in response.text

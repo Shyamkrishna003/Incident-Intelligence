@@ -476,3 +476,33 @@ Implemented as planned in §12. Deviations and details decided during implementa
 | CI workflow | Not added | Waiting on a GitHub remote. |
 
 Pinned versions at implementation: FastAPI 0.141, Starlette 1.7, SQLAlchemy 2.1, Pydantic 2.13, Alembic 1.20, structlog 26.1, pytest 9.1, pytest-asyncio 1.4, mypy 2.3, ruff 0.16.
+
+---
+
+## 14. Slice 2a (Kafka ingestion pipeline): implementation record
+
+Implemented as approved. Decisions and deviations made during implementation:
+
+| Planned / assumed | Implemented | Why |
+|---|---|---|
+| Kafka message key `project_id:service` (§5) | Key = `project_id`, **one message per batch** | A batch can span several services. One message keeps a batch atomic (one produce, one ack, one DB transaction) and still orders each series. The cost is that one large tenant uses one partition at a time. Revisit if measured. |
+| `ingest_batches` unique `(project_id, idempotency_key)` | `batch_id = uuid5(project_id, key)` as the primary key | Deterministic ids give retries the same `batch_id` before Redis exists. The primary key is the dedupe point. |
+| `body_sha256` of the raw request | `content_sha256` of the **normalized** points | Formatting differences in a retried request don't create false conflicts. |
+| — | `metric_points` carries `project_id` only (not `organization_id`) | It's the highest-volume table. The series carries the rest of the tenant chain, and a composite FK enforces project consistency. |
+| — | Values must be JSON numbers (strict) | Lax parsing accepted `"350"` as 350.0. A test caught it. |
+| — | 422s from batch rules use the same `validation_error` code as schema errors | Clients handle one kind of 422. |
+| DB outage surfaced as 500 | `OSError` and SQLAlchemy `OperationalError`/`InterfaceError` → **503 + Retry-After** | Found during the Docker outage test. Unexpected errors are now answered by the request-context middleware, so 500s carry a request id too. |
+| Migrations run by hand in Docker | One-shot `migrate` and `kafka-init` compose services; `api` and `storage-consumer` wait for both | `make up` gives a working stack from scratch. |
+| — | The storage consumer's inherited HTTP health check is disabled | Consumers serve no HTTP. Consumer lag (hardening slice) is the right signal. |
+| — | Worker processes load `RuntimeSettings` (no API-key pepper) | Least privilege: only the API holds the pepper. |
+| `examples/metrics.json` | `examples/send-metrics.sh` | The API accepts only recent timestamps, so a static file would go stale. |
+
+Verified on the Docker stack:
+- ingest, then read back
+- replay stored once
+- PostgreSQL outage: API 503, consumer retries without committing, then stores on recovery
+- poison message dead-lettered without blocking the following batch
+- Kafka outage: API 503 within ~5 s; retry after recovery accepted
+- topics survive a broker restart
+
+Pinned: `confluent-kafka` 2.15.1 (librdkafka 2.15.1), image `apache/kafka:4.3.1`.

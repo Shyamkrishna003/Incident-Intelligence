@@ -1,6 +1,15 @@
 # Local development stack. Services are added slice by slice as they gain a real job
-# (Kafka and Redis arrive with ingestion in slice 2).
+# (Redis arrives in slice 2b).
 name: incident-intel
+
+# Settings shared by every container built from ./backend. API secrets are NOT here:
+# only the api service receives API_KEY_PEPPER.
+x-backend-env: &backend-env
+  ENVIRONMENT: ${ENVIRONMENT:-local}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: ${LOG_JSON:-true}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
 
 services:
   postgres:
@@ -21,19 +30,88 @@ services:
       timeout: 3s
       retries: 20
 
-  api:
-    build: ./backend
+  # Single-node Kafka in KRaft mode (no ZooKeeper): one process is both broker and controller.
+  kafka:
+    image: apache/kafka:4.3.1
     environment:
-      ENVIRONMENT: ${ENVIRONMENT:-local}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      LOG_JSON: ${LOG_JSON:-true}
-      API_KEY_PEPPER: ${API_KEY_PEPPER:?run make env}
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # INTERNAL: other containers (kafka:9092). EXTERNAL: host tooling (localhost:9094).
+      KAFKA_LISTENERS: INTERNAL://:9092,EXTERNAL://:9094,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      # One broker, so internal topics cannot be replicated.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Topics are created deliberately by `ii kafka init`, never by a typo'd producer.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # Keep the JVM small on a laptop (leaves RAM for the local LLM later).
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
     ports:
-      - "127.0.0.1:8000:8000"
+      # Published on localhost only; PLAINTEXT without auth is for local development.
+      - "127.0.0.1:9094:9094"
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+  # One-shot jobs: apply migrations and create Kafka topics before the app starts.
+  migrate:
+    build: ./backend
+    command: ["alembic", "upgrade", "head"]
+    environment: *backend-env
     depends_on:
       postgres:
         condition: service_healthy
 
+  kafka-init:
+    build: ./backend
+    command: ["ii", "kafka", "init"]
+    environment: *backend-env
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  api:
+    build: ./backend
+    environment:
+      <<: *backend-env
+      API_KEY_PEPPER: ${API_KEY_PEPPER:?run make env}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+
+  # Kafka telemetry.metrics.v1 → PostgreSQL. Scale with `--scale storage-consumer=N`
+  # (up to the topic's partition count).
+  storage-consumer:
+    build: ./backend
+    command: ["ii", "consume", "storage"]
+    environment: *backend-env
+    restart: unless-stopped
+    # The image's HTTP health check is for the API. A consumer's real health signal is
+    # consumer lag, which arrives with Prometheus monitoring (hardening slice).
+    healthcheck:
+      disable: true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+
 volumes:
   pgdata:
+  kafkadata:

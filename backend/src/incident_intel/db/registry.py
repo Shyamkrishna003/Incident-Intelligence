@@ -2,6 +2,7 @@
 
 from incident_intel.audit import models as audit_models
 from incident_intel.db.base import Base
+from incident_intel.telemetry import models as telemetry_models
 from incident_intel.tenancy import models as tenancy_models
 
-__all__ = ["Base", "audit_models", "tenancy_models"]
+__all__ = ["Base", "audit_models", "telemetry_models", "tenancy_models"]

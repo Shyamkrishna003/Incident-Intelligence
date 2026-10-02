@@ -3,7 +3,8 @@
 - ``/healthz``: the process is up. Never touches dependencies, so a database outage does
   not cause an orchestrator to restart healthy API processes.
 - ``/readyz``: the process can serve traffic: the database is reachable and its schema is
-  at the migration head this code expects.
+  at the migration head this code expects, and Kafka is reachable with the topics the API
+  publishes to. Checks run concurrently, each bounded by a timeout.
 """
 
 import asyncio
@@ -15,6 +16,8 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from incident_intel.streaming.producer import MessagePublisher, PublishError
 
 logger = structlog.get_logger(__name__)
 
@@ -52,6 +55,22 @@ async def check_database(
     return {"database": "ok", "migrations": "ok"}
 
 
+async def check_kafka(
+    publisher: MessagePublisher, *, topics: list[str], timeout_seconds: float
+) -> dict[str, CheckStatus]:
+    try:
+        async with asyncio.timeout(timeout_seconds + 1):
+            missing = await publisher.missing_topics(topics, timeout_seconds=timeout_seconds)
+    except (TimeoutError, PublishError) as exc:
+        logger.warning("readiness_kafka_unavailable", error_type=type(exc).__name__)
+        return {"kafka": "unavailable"}
+    if missing:
+        # Topics are created by `ii kafka init`; the API never auto-creates them.
+        logger.warning("readiness_kafka_topics_missing", missing=sorted(missing))
+        return {"kafka": "pending"}
+    return {"kafka": "ok"}
+
+
 @router.get("/healthz", response_model=LivenessResponse)
 async def healthz() -> LivenessResponse:
     return LivenessResponse(status="ok")
@@ -63,11 +82,15 @@ async def healthz() -> LivenessResponse:
     responses={503: {"model": ReadinessResponse}},
 )
 async def readyz(request: Request, response: Response) -> ReadinessResponse:
-    checks = await check_database(
-        request.app.state.engine,
-        expected_head=request.app.state.expected_migration_head,
-        timeout_seconds=request.app.state.settings.readiness_timeout_seconds,
+    state = request.app.state
+    timeout = state.settings.readiness_timeout_seconds
+    database, kafka = await asyncio.gather(
+        check_database(
+            state.engine, expected_head=state.expected_migration_head, timeout_seconds=timeout
+        ),
+        check_kafka(state.publisher, topics=[state.metrics_topic], timeout_seconds=timeout),
     )
+    checks = {**database, **kafka}
     ready = all(status == "ok" for status in checks.values())
     if not ready:
         response.status_code = 503

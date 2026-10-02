@@ -2,12 +2,15 @@
 
 Integration tests run against a dedicated PostgreSQL database (TEST_DATABASE_URL, whose name
 must end in ``_test``). Migrations are applied once per session; each test then runs inside
-an outer transaction that is rolled back, so tests are isolated and leave no data behind.
-Service code that calls ``commit()`` only releases a SAVEPOINT inside that transaction.
+an outer transaction on one connection that is rolled back afterwards, so tests are isolated
+and leave no data behind. Every session in a test (the API's, the storage consumer's) joins
+that transaction, and service code that calls ``commit()`` only releases a SAVEPOINT.
+
+Kafka tests (marker ``kafka``) additionally need TEST_KAFKA_BOOTSTRAP_SERVERS.
 """
 
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 
 import pytest
@@ -17,7 +20,13 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncConnection,
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.pool import NullPool
 
 from incident_intel.audit.service import CLI_ACTOR
@@ -25,20 +34,27 @@ from incident_intel.core.config import Settings
 from incident_intel.db.migrations import alembic_config
 from incident_intel.db.session import get_session
 from incident_intel.main import create_app
+from incident_intel.tenancy.api_keys import DEFAULT_SCOPES, ApiKeyScope
 from incident_intel.tenancy.models import ApiKey, Organization, Project
 from incident_intel.tenancy.service import create_organization, create_project, issue_api_key
-from tests.support import TEST_PEPPER, make_settings
+from tests.support import TEST_PEPPER, FakePublisher, make_settings
 
 
 class _TestEnvironment(BaseSettings):
     model_config = SettingsConfigDict(env_file=(".env", "../.env"), extra="ignore")
 
     test_database_url: SecretStr | None = None
+    test_kafka_bootstrap_servers: str | None = None
 
 
 @pytest.fixture(scope="session")
-def test_database_url() -> str:
-    configured = _TestEnvironment().test_database_url
+def test_environment() -> _TestEnvironment:
+    return _TestEnvironment()
+
+
+@pytest.fixture(scope="session")
+def test_database_url(test_environment: _TestEnvironment) -> str:
+    configured = test_environment.test_database_url
     if configured is None:
         pytest.skip("TEST_DATABASE_URL is not set; integration tests need the test database")
     url = configured.get_secret_value()
@@ -66,22 +82,41 @@ async def engine(migrated_database: str) -> AsyncIterator[AsyncEngine]:
 
 
 @pytest.fixture
-async def db_session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
+async def db_connection(engine: AsyncEngine) -> AsyncIterator[AsyncConnection]:
     async with engine.connect() as connection:
         transaction = await connection.begin()
-        session = AsyncSession(
-            bind=connection, join_transaction_mode="create_savepoint", expire_on_commit=False
-        )
         try:
-            yield session
+            yield connection
         finally:
-            await session.close()
             await transaction.rollback()
 
 
 @pytest.fixture
-async def app(settings: Settings, db_session: AsyncSession) -> AsyncIterator[FastAPI]:
-    application = create_app(settings)
+def session_factory(db_connection: AsyncConnection) -> async_sessionmaker[AsyncSession]:
+    """Sessions that join the test's outer transaction (for code that opens its own)."""
+    return async_sessionmaker(
+        bind=db_connection, join_transaction_mode="create_savepoint", expire_on_commit=False
+    )
+
+
+@pytest.fixture
+async def db_session(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[AsyncSession]:
+    async with session_factory() as session:
+        yield session
+
+
+@pytest.fixture
+def publisher() -> FakePublisher:
+    return FakePublisher()
+
+
+@pytest.fixture
+async def app(
+    settings: Settings, db_session: AsyncSession, publisher: FakePublisher
+) -> AsyncIterator[FastAPI]:
+    application = create_app(settings, publisher=publisher)
 
     async def _test_session() -> AsyncIterator[AsyncSession]:
         yield db_session
@@ -109,26 +144,35 @@ class Tenant:
         return {"Authorization": f"Bearer {self.plaintext_key}"}
 
 
-TenantFactory = Callable[[], Awaitable[Tenant]]
+class TenantFactory:
+    """Creates an isolated organization/project with one API key (all scopes by default)."""
 
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
 
-@pytest.fixture
-def make_tenant(db_session: AsyncSession) -> TenantFactory:
-    async def _make() -> Tenant:
+    async def __call__(self, *, scopes: Iterable[ApiKeyScope] = DEFAULT_SCOPES) -> Tenant:
         suffix = uuid.uuid4().hex[:8]
         organization = await create_organization(
-            db_session, slug=f"org-{suffix}", name=f"Org {suffix}", actor=CLI_ACTOR
+            self._session, slug=f"org-{suffix}", name=f"Org {suffix}", actor=CLI_ACTOR
         )
         project = await create_project(
-            db_session,
+            self._session,
             organization_id=organization.id,
             slug="payments",
             name="Payments",
             actor=CLI_ACTOR,
         )
         issued = await issue_api_key(
-            db_session, project=project, name="test", pepper=TEST_PEPPER, actor=CLI_ACTOR
+            self._session,
+            project=project,
+            name="test",
+            pepper=TEST_PEPPER,
+            actor=CLI_ACTOR,
+            scopes=scopes,
         )
         return Tenant(organization, project, issued.api_key, issued.plaintext)
 
-    return _make
+
+@pytest.fixture
+def make_tenant(db_session: AsyncSession) -> TenantFactory:
+    return TenantFactory(db_session)

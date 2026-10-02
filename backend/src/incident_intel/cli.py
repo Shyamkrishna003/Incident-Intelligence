@@ -2,21 +2,35 @@
 
 Plaintext API keys are printed to stdout exactly once; logs go to stderr so the key can be
 captured cleanly (for example ``KEY=$(ii api-keys create ...)``).
+
+Tenancy commands load the full API settings (they need the API-key pepper). Kafka and
+consumer commands load only runtime settings, so worker processes never hold API secrets.
 """
 
 import argparse
 import asyncio
+import json
+import signal
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
+from confluent_kafka import KafkaException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incident_intel.audit.service import CLI_ACTOR
-from incident_intel.core.config import Settings, get_settings
+from incident_intel.core.config import (
+    RuntimeSettings,
+    Settings,
+    get_runtime_settings,
+    get_settings,
+)
 from incident_intel.core.errors import AppError
 from incident_intel.core.logging import configure_logging
 from incident_intel.db.session import create_engine, create_session_factory
+from incident_intel.streaming.admin import ensure_topics, read_topic_from_start
+from incident_intel.streaming.topics import METRICS_DLQ, topic_name
+from incident_intel.telemetry.consumer import run_storage_consumer
 from incident_intel.tenancy.api_keys import DEFAULT_SCOPES, ApiKeyScope
 from incident_intel.tenancy.service import (
     IssuedApiKey,
@@ -66,6 +80,23 @@ def build_parser() -> argparse.ArgumentParser:
     list_keys = key_commands.add_parser("list", help="List a project's API keys (no secrets)")
     list_keys.add_argument("--org", required=True)
     list_keys.add_argument("--project", required=True)
+
+    kafka = commands.add_parser("kafka", help="Kafka administration")
+    kafka_commands = kafka.add_subparsers(dest="kafka_command", required=True)
+    kafka_commands.add_parser("init", help="Create missing topics (existing ones are unchanged)")
+
+    consume = commands.add_parser("consume", help="Run a long-lived consumer until SIGTERM")
+    consume.add_argument("consumer", choices=["storage"])
+
+    dlq = commands.add_parser("dlq", help="Inspect dead-lettered messages")
+    dlq_commands = dlq.add_subparsers(dest="dlq_command", required=True)
+    inspect = dlq_commands.add_parser("inspect", help="Show dead-lettered metric messages")
+    inspect.add_argument("--limit", type=int, default=20)
+    inspect.add_argument(
+        "--show-values",
+        action="store_true",
+        help="include a preview of each message body (contains customer telemetry)",
+    )
 
     return parser
 
@@ -133,7 +164,7 @@ async def _api_keys(session: AsyncSession, args: argparse.Namespace, pepper: str
             )
 
 
-async def _run(args: argparse.Namespace, settings: Settings) -> None:
+async def _run_tenancy(args: argparse.Namespace, settings: Settings) -> None:
     engine = create_engine(settings)
     pepper = settings.api_key_pepper.get_secret_value()
     try:
@@ -146,14 +177,54 @@ async def _run(args: argparse.Namespace, settings: Settings) -> None:
         await engine.dispose()
 
 
+def _kafka_init(settings: RuntimeSettings) -> None:
+    for name, status in ensure_topics(settings).items():
+        print(f"{name}\t{status}", file=sys.stderr)
+
+
+async def _consume(settings: RuntimeSettings) -> None:
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(signum, stop.set)
+    await run_storage_consumer(settings, stop)
+
+
+def _dlq_inspect(args: argparse.Namespace, settings: RuntimeSettings) -> None:
+    topic = topic_name(settings, METRICS_DLQ)
+    for message in read_topic_from_start(settings, topic, limit=args.limit):
+        record = {
+            "position": message.position,
+            "reason": message.headers.get("dlq.reason"),
+            "detail": message.headers.get("dlq.detail"),
+            "source": message.headers.get("dlq.source"),
+            "size_bytes": len(message.value),
+        }
+        if args.show_values:
+            record["value_preview"] = message.value[:500].decode("utf-8", errors="replace")
+        print(json.dumps(record))
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    settings = get_settings()
+    settings: RuntimeSettings = (
+        get_settings() if args.command in {"bootstrap", "api-keys"} else get_runtime_settings()
+    )
     configure_logging(level=settings.log_level, json=settings.log_json, stream=sys.stderr)
     try:
-        asyncio.run(_run(args, settings))
+        if isinstance(settings, Settings):
+            asyncio.run(_run_tenancy(args, settings))
+        elif args.command == "kafka":
+            _kafka_init(settings)
+        elif args.command == "consume":
+            asyncio.run(_consume(settings))
+        elif args.command == "dlq":
+            _dlq_inspect(args, settings)
     except AppError as exc:
         print(f"error: {exc.message}", file=sys.stderr)
+        return 1
+    except KafkaException as exc:
+        print(f"error: kafka: {exc.args[0].str()}", file=sys.stderr)
         return 1
     return 0
 

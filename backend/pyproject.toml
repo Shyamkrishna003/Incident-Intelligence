@@ -16,6 +16,7 @@ dependencies = [
     "asyncpg>=0.30",
     "alembic>=1.14",
     "structlog>=24.4",
+    "confluent-kafka>=2.15",
 ]
 
 [project.optional-dependencies]
@@ -43,7 +44,10 @@ incident_intel = ["migrations/*.py", "migrations/*.mako", "migrations/versions/*
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-markers = ["integration: requires the test PostgreSQL database"]
+markers = [
+    "integration: requires the test PostgreSQL database",
+    "kafka: requires a Kafka broker (TEST_KAFKA_BOOTSTRAP_SERVERS)",
+]
 addopts = "-ra --strict-markers"
 filterwarnings = ["error"]
 
@@ -56,6 +60,7 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC", "SIM", "RUF", "PL", "PT"]
 ignore = [
     "PLR0913", # explicit keyword-only service signatures are clearer than parameter objects here
+    "PLR0917", # FastAPI endpoints declare each injected dependency as a parameter
     "PLR2004", # magic values in comparisons are fine for HTTP status codes
 ]
 

@@ -1,3 +1,4 @@
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Annotated
 
@@ -7,8 +8,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from incident_intel.core.config import Settings
-from incident_intel.core.errors import AuthenticationError
+from incident_intel.core.errors import AuthenticationError, PermissionDeniedError
 from incident_intel.db.session import get_session
+from incident_intel.streaming.producer import MessagePublisher
+from incident_intel.tenancy.api_keys import ApiKeyScope
 from incident_intel.tenancy.context import TenantContext
 from incident_intel.tenancy.service import authenticate_api_key
 
@@ -20,6 +23,11 @@ _bearer = HTTPBearer(auto_error=False, description="Project API key: `Bearer ii_
 def get_settings_dep(request: Request) -> Settings:
     settings: Settings = request.app.state.settings
     return settings
+
+
+def get_publisher(request: Request) -> MessagePublisher:
+    publisher: MessagePublisher = request.app.state.publisher
+    return publisher
 
 
 async def get_tenant_context(
@@ -47,3 +55,17 @@ async def get_tenant_context(
         api_key_prefix=ctx.principal.key_prefix,
     )
     return ctx
+
+
+def require_scope(scope: ApiKeyScope) -> Callable[..., Awaitable[TenantContext]]:
+    """Dependency factory: authenticate, then require ``scope`` on the API key (else 403)."""
+
+    async def dependency(
+        ctx: Annotated[TenantContext, Depends(get_tenant_context)],
+    ) -> TenantContext:
+        if scope not in ctx.principal.scopes:
+            logger.info("api_key_scope_denied", required_scope=scope.value)
+            raise PermissionDeniedError(f"This API key lacks the '{scope.value}' scope.")
+        return ctx
+
+    return dependency

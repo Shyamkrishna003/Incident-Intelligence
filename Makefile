@@ -5,7 +5,7 @@
 COMPOSE := docker compose
 VENV_BIN := ../.venv/bin
 
-.PHONY: help env venv lock db up down logs migrate run bootstrap test test-unit lint fmt typecheck check
+.PHONY: help env venv lock db infra kafka-init up down logs migrate run consume dlq bootstrap test test-unit lint fmt typecheck check
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
@@ -29,17 +29,24 @@ lock: ## Re-resolve pinned dependencies after editing backend/pyproject.toml
 	cd backend && $(VENV_BIN)/pip-compile --quiet --strip-extras --generate-hashes --allow-unsafe -o requirements.lock pyproject.toml
 	cd backend && $(VENV_BIN)/pip-compile --quiet --strip-extras --generate-hashes --allow-unsafe --extra dev -o requirements-dev.lock pyproject.toml
 
-db: ## Start PostgreSQL only (enough for migrations, the CLI, and tests)
+db: ## Start PostgreSQL only
 	$(COMPOSE) up -d --wait postgres
 
-up: ## Build and start PostgreSQL + API on http://localhost:8000
+infra: venv ## Start PostgreSQL + Kafka, create topics (enough for host-run API, consumer, tests)
+	$(COMPOSE) up -d --wait postgres kafka
+	cd backend && $(VENV_BIN)/ii kafka init
+
+kafka-init: venv ## Create missing Kafka topics
+	cd backend && $(VENV_BIN)/ii kafka init
+
+up: ## Build and start everything in Docker (API on http://localhost:8000)
 	$(COMPOSE) up -d --build --wait
 
-down: ## Stop the stack (data volume is kept)
+down: ## Stop the stack (data volumes are kept)
 	$(COMPOSE) down
 
-logs: ## Follow API logs
-	$(COMPOSE) logs -f api
+logs: ## Follow API and storage-consumer logs
+	$(COMPOSE) logs -f api storage-consumer
 
 migrate: venv ## Apply database migrations
 	cd backend && $(VENV_BIN)/alembic upgrade head
@@ -47,15 +54,21 @@ migrate: venv ## Apply database migrations
 run: venv ## Run the API on the host with auto-reload
 	cd backend && $(VENV_BIN)/uvicorn incident_intel.main:create_app --factory --reload --no-access-log
 
+consume: venv ## Run the storage consumer on the host (Kafka -> PostgreSQL)
+	cd backend && $(VENV_BIN)/ii consume storage
+
+dlq: venv ## Show dead-lettered messages (metadata only)
+	cd backend && $(VENV_BIN)/ii dlq inspect
+
 bootstrap: venv ## Create an org, project, and API key: make bootstrap ORG=acme PROJECT=payments
 	@test -n "$(ORG)" -a -n "$(PROJECT)" || { echo "usage: make bootstrap ORG=<slug> PROJECT=<slug>"; exit 2; }
 	cd backend && $(VENV_BIN)/ii bootstrap --org "$(ORG)" --project "$(PROJECT)"
 
-test: venv ## Run all tests (integration tests need `make db`)
+test: venv ## Run all tests (needs `make infra`)
 	cd backend && $(VENV_BIN)/pytest
 
-test-unit: venv ## Run tests that need no database
-	cd backend && $(VENV_BIN)/pytest -m "not integration"
+test-unit: venv ## Run tests that need neither PostgreSQL nor Kafka
+	cd backend && $(VENV_BIN)/pytest -m "not integration and not kafka"
 
 lint: venv ## Lint and check formatting
 	cd backend && $(VENV_BIN)/ruff check src tests && $(VENV_BIN)/ruff format --check src tests
