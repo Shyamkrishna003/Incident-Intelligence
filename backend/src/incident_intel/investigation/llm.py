@@ -23,7 +23,7 @@ class WorkerSettings(RuntimeSettings):
     """Settings for the investigation worker: the only process that holds the LLM key."""
 
     gemini_api_key: SecretStr | None = None
-    gemini_model: str = Field(default="gemini-2.5-flash", pattern=r"^[A-Za-z0-9._-]{1,80}$")
+    gemini_model: str = Field(default="gemini-3.5-flash", pattern=r"^[A-Za-z0-9._-]{1,80}$")
     gemini_base_url: str = "https://generativelanguage.googleapis.com"
     llm_timeout_seconds: float = Field(default=90.0, gt=0)
     llm_max_output_tokens: int = Field(default=8192, ge=256)

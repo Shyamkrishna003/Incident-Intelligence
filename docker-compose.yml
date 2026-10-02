@@ -157,7 +157,7 @@ services:
     environment:
       <<: *backend-env
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
     restart: unless-stopped
     healthcheck:
       disable: true

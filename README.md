@@ -560,7 +560,8 @@ See [.env.example](.env.example).
 - **Late metric points are not evaluated.** A point older than what its series has already been evaluated through is stored but skipped by detection.
 - **An anomaly on a series that stops reporting stays open** until a later point arrives.
 - **No user-configured thresholds or alert rules yet,** and no notifications. Anomalies are visible in the app and the API only.
-- **The real Gemini call has not been run yet.** Everything around it is tested, and the worker was run end to end against a stand-in for the Gemini API. The default model name (`gemini-2.5-flash`) is unverified and may need changing.
+- **Real Gemini runs are slow and sometimes unavailable.** Two real investigations of the simulated incident with `gemini-3.5-flash` took about 105 and 130 seconds. `gemini-3.8-flash` answered "high demand" (503) four times in a row, which fails the investigation with that message.
+- **The real model was run on one scenario only,** the simulated payment incident.
 - **Report quality is not evaluated yet.** The checks guarantee that citations are real, not that the reasoning is right. An evaluation suite for investigations is the next slice.
 - **Only Gemini is supported.** A local Ollama provider is planned.
 - **Evidence is a fixed set.** The model can't ask for more (for example a different time window), and no metric time series beyond each anomaly's summary is included.

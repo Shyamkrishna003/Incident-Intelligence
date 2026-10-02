@@ -748,4 +748,8 @@ Verified:
 - by tests with a scripted model (see README)
 - end to end with the real worker and Gemini client against a stand-in HTTP server returning a canned reply, in a real browser: the uncited fact and an invented reference were removed and listed, the second check overturned one hypothesis, citations open their evidence, and the page works at 390px
 
-Not verified: any call to the real Gemini API (no key was available).
+Verified against the real Gemini API, once a key was available (the simulated payment incident, 15 evidence items):
+- `gemini-3.5-flash` produced a report in about 105 s (7,405 input and 1,122 output tokens, one provider retry). Its one hypothesis, marked supported, matches the cause the simulator plants: version 2.43.0's query on `customer_ref` causing sequential scans, pool exhaustion and cascading errors. All 8 facts cited real evidence; the checks changed nothing; the second check returned "holds".
+- `gemini-3.8-flash` answered 503 "high demand" on all four tries, and the investigation failed with that message, as designed.
+- The first report's summary stated the cause as established. Prompt version 2 tells the model to write "the evidence suggests"; a second real run did.
+- This is one scenario, which the model could solve largely from the log text. It is not an evaluation.

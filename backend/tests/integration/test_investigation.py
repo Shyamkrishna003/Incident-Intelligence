@@ -21,7 +21,11 @@ from incident_intel.incidents.models import Incident
 from incident_intel.investigation.llm import LLMError
 from incident_intel.investigation.models import Investigation, InvestigationStep
 from incident_intel.investigation.orchestrator import run_investigation
-from incident_intel.investigation.prompts import ANALYSIS_SYSTEM, VERIFICATION_SYSTEM
+from incident_intel.investigation.prompts import (
+    ANALYSIS_SYSTEM,
+    PROMPT_VERSION,
+    VERIFICATION_SYSTEM,
+)
 from incident_intel.investigation.service import (
     claim_next,
     get_investigation,
@@ -305,7 +309,7 @@ async def test_a_successful_investigation_stores_a_checked_report_and_its_trail(
     assert (investigation.provider, investigation.model, investigation.prompt_version) == (
         "fake",
         "fake-model",
-        "1",
+        PROMPT_VERSION,
     )
     assert (investigation.input_tokens, investigation.output_tokens) == (200, 40)
     assert investigation.report is not None
