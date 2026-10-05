@@ -5,6 +5,8 @@ Settings are layered so each process receives only what it needs:
 - ``DatabaseSettings``: PostgreSQL access (migrations).
 - ``RuntimeSettings``: + logging and Kafka (background consumers; no API secrets).
 - ``Settings``: + API-only secrets and request limits (the HTTP API and admin CLI).
+- ``EncryptionSettings``: the key for stored secrets; only the API and the investigation
+  worker include it.
 """
 
 from functools import lru_cache
@@ -12,6 +14,8 @@ from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from incident_intel.core.crypto import validate_encryption_key
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
@@ -74,7 +78,30 @@ class RuntimeSettings(DatabaseSettings):
     deployment_lookback_seconds: int = Field(default=60 * 60, ge=0)
 
 
-class Settings(RuntimeSettings):
+class EncryptionSettings(BaseSettings):
+    """Mixed into the settings of the two processes that store or read encrypted secrets:
+    the API (encrypts a project's GitHub token) and the investigation worker (decrypts it)."""
+
+    # A Fernet key (`make secrets-key`). Unset: integrations that store secrets are off.
+    # Changing it makes every stored secret unreadable; they must be entered again.
+    secrets_encryption_key: SecretStr | None = None
+    github_api_url: str = Field(default="https://api.github.com", pattern=r"^https?://\S+$")
+    github_timeout_seconds: float = Field(default=10.0, gt=0)
+
+    @field_validator("secrets_encryption_key", mode="before")
+    @classmethod
+    def _empty_key_means_unset(cls, value: object) -> object:
+        return None if value == "" else value
+
+    @field_validator("secrets_encryption_key")
+    @classmethod
+    def _usable_key(cls, value: SecretStr | None) -> SecretStr | None:
+        if value is not None:
+            validate_encryption_key(value.get_secret_value())
+        return value
+
+
+class Settings(RuntimeSettings, EncryptionSettings):
     # Server-side secret mixed into API-key hashes. Rotating it invalidates all keys.
     api_key_pepper: SecretStr = Field(min_length=32)
     # Avoid a database write on every authenticated request.

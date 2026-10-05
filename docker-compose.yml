@@ -1,8 +1,9 @@
 # Local development stack. Services are added slice by slice as they gain a real job.
 name: incident-intel
 
-# Settings shared by every container built from ./backend. API secrets are NOT here:
-# only the api service receives API_KEY_PEPPER.
+# Settings shared by every container built from ./backend. Secrets are NOT here: only the
+# api service receives API_KEY_PEPPER, only the worker receives the LLM key, and only those
+# two receive SECRETS_ENCRYPTION_KEY.
 x-backend-env: &backend-env
   ENVIRONMENT: ${ENVIRONMENT:-local}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -106,6 +107,8 @@ services:
       # Sign-in for human users. Empty project id: user endpoints answer 503.
       FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
       FIREBASE_AUTH_EMULATOR_HOST: ${FIREBASE_AUTH_EMULATOR_HOST:-}
+      # Encrypts a project's GitHub token before it is stored. Empty: GitHub is unavailable.
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -150,7 +153,8 @@ services:
         condition: service_completed_successfully
 
   # Runs queued AI investigations. The only container that receives the LLM API key.
-  # Without a key it still runs, and investigations fail with a clear message.
+  # Without a key it still runs, and investigations fail with a clear message. It also reads
+  # stored GitHub tokens (to fetch what a deployment changed), so it gets the encryption key.
   investigation-worker:
     build: ./backend
     command: ["ii", "work"]
@@ -158,6 +162,7 @@ services:
       <<: *backend-env
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.5-flash}
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
     restart: unless-stopped
     healthcheck:
       disable: true

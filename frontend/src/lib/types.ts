@@ -287,6 +287,22 @@ export interface ApiKey {
   revoked_at: string | null;
 }
 
+export interface RepositoryMapping {
+  service: string;
+  /** "owner/name" */
+  repository: string;
+}
+
+/** A project's GitHub settings. The token itself is never returned, only its last 4 characters. */
+export interface GitHubStatus {
+  /** False when the server cannot store tokens (no encryption key configured). */
+  available: boolean;
+  connected: boolean;
+  token_hint: string | null;
+  connected_at: string | null;
+  repositories: RepositoryMapping[];
+}
+
 /** Returned once, at creation. `key` cannot be retrieved again. */
 export interface ApiKeyCreated extends ApiKey {
   key: string;

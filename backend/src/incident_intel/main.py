@@ -13,6 +13,7 @@ from incident_intel.api import health
 from incident_intel.auth.tokens import TokenVerifier, build_token_verifier
 from incident_intel.cache.services import CacheServices, build_redis_cache
 from incident_intel.core.config import Settings, get_settings
+from incident_intel.core.crypto import SecretBox
 from incident_intel.core.errors import install_exception_handlers
 from incident_intel.core.logging import configure_logging
 from incident_intel.core.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
@@ -23,6 +24,8 @@ from incident_intel.detection.router import router as detection_router
 from incident_intel.incidents.router import project_router as incidents_project_router
 from incident_intel.incidents.router import router as incidents_router
 from incident_intel.ingestion.router import router as ingestion_router
+from incident_intel.integrations.github.client import GitHubClient
+from incident_intel.integrations.github.router import router as github_router
 from incident_intel.investigation.router import router as investigation_router
 from incident_intel.learning.router import router as learning_router
 from incident_intel.streaming.producer import KafkaPublisher, MessagePublisher
@@ -41,6 +44,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await app.state.publisher.close()
     await app.state.cache.close()
     await app.state.token_verifier.close()
+    await app.state.github.close()
     await app.state.engine.dispose()
 
 
@@ -50,9 +54,10 @@ def create_app(
     publisher: MessagePublisher | None = None,
     cache: CacheServices | None = None,
     token_verifier: TokenVerifier | None = None,
+    github: GitHubClient | None = None,
 ) -> FastAPI:
-    """Build the API. ``publisher``, ``cache`` and ``token_verifier`` can be injected
-    (tests); by default Kafka, Redis and Firebase are used."""
+    """Build the API. ``publisher``, ``cache``, ``token_verifier`` and ``github`` can be
+    injected (tests); by default Kafka, Redis, Firebase and api.github.com are used."""
     settings = settings or get_settings()
     configure_logging(level=settings.log_level, json=settings.log_json)
 
@@ -80,6 +85,15 @@ def create_app(
     app.state.deployments_topic = topic_name(settings, DEPLOYMENTS)
     app.state.cache = cache or build_redis_cache(settings)
     app.state.token_verifier = token_verifier or build_token_verifier(settings)
+    # None: no SECRETS_ENCRYPTION_KEY, so integrations that store a secret are unavailable.
+    app.state.secret_box = (
+        SecretBox(settings.secrets_encryption_key.get_secret_value())
+        if settings.secrets_encryption_key
+        else None
+    )
+    app.state.github = github or GitHubClient(
+        base_url=settings.github_api_url, timeout_seconds=settings.github_timeout_seconds
+    )
 
     install_exception_handlers(app)
     # Starlette runs the last-added middleware first: request context wraps everything,
@@ -101,4 +115,5 @@ def create_app(
     app.include_router(incidents_project_router)
     app.include_router(investigation_router)
     app.include_router(learning_router)
+    app.include_router(github_router)
     return app

@@ -2,7 +2,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 
 import { useAuth } from "../auth/AuthContext";
 import { api } from "../lib/api";
-import type { ApiKeyScope, Severity, Verdict } from "../lib/types";
+import type { ApiKeyScope, RepositoryMapping, Severity, Verdict } from "../lib/types";
 
 /** Keys are namespaced by user id so one person never sees another's cached data. */
 function useUid(): string {
@@ -231,6 +231,43 @@ export function useRevokeApiKey(projectId: string) {
   return useMutation({
     mutationFn: (prefix: string) => api.revokeApiKey(projectId, prefix),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: [uid, "api-keys", projectId] }),
+  });
+}
+
+export function useGitHub(projectId: string, enabled: boolean) {
+  const uid = useUid();
+  return useQuery({
+    queryKey: [uid, "github", projectId],
+    queryFn: () => api.getGitHub(projectId),
+    enabled,
+  });
+}
+
+export function useConnectGitHub(projectId: string) {
+  const uid = useUid();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (token: string) => api.connectGitHub(projectId, token),
+    onSuccess: (status) => { queryClient.setQueryData([uid, "github", projectId], status); },
+  });
+}
+
+export function useDisconnectGitHub(projectId: string) {
+  const uid = useUid();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.disconnectGitHub(projectId),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: [uid, "github", projectId] }),
+  });
+}
+
+export function useSetGitHubRepositories(projectId: string) {
+  const uid = useUid();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (repositories: RepositoryMapping[]) =>
+      api.setGitHubRepositories(projectId, repositories),
+    onSuccess: (status) => { queryClient.setQueryData([uid, "github", projectId], status); },
   });
 }
 

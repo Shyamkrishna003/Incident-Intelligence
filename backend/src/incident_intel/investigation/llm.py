@@ -12,15 +12,16 @@ import httpx
 import structlog
 from pydantic import Field, SecretStr, field_validator
 
-from incident_intel.core.config import RuntimeSettings
+from incident_intel.core.config import EncryptionSettings, RuntimeSettings
 
 logger = structlog.get_logger(__name__)
 
 _MAX_ERROR_DETAIL = 200
 
 
-class WorkerSettings(RuntimeSettings):
-    """Settings for the investigation worker: the only process that holds the LLM key."""
+class WorkerSettings(RuntimeSettings, EncryptionSettings):
+    """Settings for the investigation worker: the only process that holds the LLM key. It
+    also reads stored integration secrets (a project's GitHub token) to collect evidence."""
 
     gemini_api_key: SecretStr | None = None
     gemini_model: str = Field(default="gemini-3.5-flash", pattern=r"^[A-Za-z0-9._-]{1,80}$")

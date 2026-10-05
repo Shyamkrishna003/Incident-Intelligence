@@ -5,16 +5,25 @@
 COMPOSE := docker compose
 VENV_BIN := ../.venv/bin
 
-.PHONY: help env venv lock db infra emulator kafka-init web-install web web-check simulate eval eval-investigation up down logs migrate run consume detect work dlq bootstrap test test-unit lint fmt typecheck check
+.PHONY: help env secrets-key venv lock db infra emulator kafka-init web-install web web-check simulate eval eval-investigation up down logs migrate run consume detect work dlq bootstrap test test-unit lint fmt typecheck check
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-12s %s\n", $$1, $$2}'
 
-env: ## Create .env from .env.example with a generated API-key pepper (never overwrites)
+env: ## Create .env from .env.example with generated secrets (never overwrites)
 	@if [ -f .env ]; then echo ".env already exists; left untouched"; else \
 	  cp .env.example .env && \
 	  sed -i "s|^API_KEY_PEPPER=.*|API_KEY_PEPPER=$$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')|" .env && \
+	  sed -i "s|^SECRETS_ENCRYPTION_KEY=.*|SECRETS_ENCRYPTION_KEY=$$(python3 -c 'import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())')|" .env && \
 	  echo "Created .env"; fi
+
+secrets-key: ## Add a generated SECRETS_ENCRYPTION_KEY to an existing .env (never replaces one)
+	@test -f .env || { echo "no .env yet; run make env"; exit 2; }
+	@if grep -q '^SECRETS_ENCRYPTION_KEY=.\+' .env; then echo "SECRETS_ENCRYPTION_KEY is already set; left untouched"; else \
+	  key=$$(python3 -c 'import base64, secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())') && \
+	  if grep -q '^SECRETS_ENCRYPTION_KEY=' .env; then sed -i "s|^SECRETS_ENCRYPTION_KEY=.*|SECRETS_ENCRYPTION_KEY=$$key|" .env; \
+	  else printf '\n# Encrypts stored integration secrets (GitHub tokens). See .env.example.\nSECRETS_ENCRYPTION_KEY=%s\n' "$$key" >> .env; fi && \
+	  echo "Added SECRETS_ENCRYPTION_KEY to .env (the key itself is not printed)"; fi
 
 venv: .venv/.installed ## Create .venv and install the locked dependencies
 

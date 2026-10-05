@@ -80,9 +80,14 @@ export function AppShell({
               Deployments
             </NavLink>
             {roleAtLeast(current.organization.role, "admin") && (
-              <NavLink to={`${base}/api-keys`} className={navClass}>
-                API keys
-              </NavLink>
+              <>
+                <NavLink to={`${base}/api-keys`} className={navClass}>
+                  API keys
+                </NavLink>
+                <NavLink to={`${base}/github`} className={navClass}>
+                  GitHub
+                </NavLink>
+              </>
             )}
           </nav>
 

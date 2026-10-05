@@ -19,6 +19,8 @@ dependencies = [
     "confluent-kafka>=2.15",
     "redis>=8.0",
     "firebase-admin>=7.0",
+    # Encrypts stored integration secrets (a project's GitHub token).
+    "cryptography>=44",
     # HTTP client for the scenario simulator (`ii simulate`); also used by tests.
     "httpx>=0.27",
 ]

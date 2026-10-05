@@ -85,7 +85,7 @@ def test_a_case_can_require_that_nothing_is_called_supported() -> None:
 def test_builtin_cases_are_well_formed() -> None:
     cases = builtin_cases()
 
-    assert len({case.name for case in cases}) == len(cases) == 5
+    assert len({case.name for case in cases}) == len(cases) == 6
     for case in cases:
         refs = [item["ref"] for item in case.evidence]
         assert refs == [f"E{i}" for i in range(1, len(refs) + 1)], case.name

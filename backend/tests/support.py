@@ -35,6 +35,7 @@ def make_settings(database_url: str, **overrides: Any) -> Settings:
         # Explicit, so tests never pick these up from a developer's .env.
         "firebase_project_id": None,
         "firebase_auth_emulator_host": None,
+        "secrets_encryption_key": None,
         "log_json": True,
         **overrides,
     }

@@ -33,6 +33,8 @@ SENSITIVE_KEYS = frozenset(
         "api_key_pepper",
         "key_hash",
         "database_url",
+        "secrets_encryption_key",
+        "token_encrypted",
     }
 )
 
@@ -43,6 +45,9 @@ _SECRET_PATTERNS = (
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"),
     # Google API keys (for example the Gemini key).
     re.compile(r"AIza[0-9A-Za-z_-]{30,}"),
+    # GitHub tokens: fine-grained (github_pat_) and classic (ghp_, gho_, ghs_, ...).
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     # name=value or name: value where the name says the value is a secret.
     re.compile(r"(?i)(?<=\b)(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*\S+"),
 )

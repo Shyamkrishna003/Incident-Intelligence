@@ -6,6 +6,7 @@ import type {
   AnomalyList,
   ApiKeyScope,
   DeploymentList,
+  GitHubStatus,
   IncidentDetail,
   IncidentList,
   Feedback,
@@ -18,6 +19,7 @@ import type {
   MetricRange,
   OrganizationCreated,
   Project,
+  RepositoryMapping,
   Service,
   Severity,
   Verdict,
@@ -124,6 +126,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 const json = (body: unknown): RequestInit => ({ method: "POST", body: JSON.stringify(body) });
+const put = (body: unknown): RequestInit => ({ method: "PUT", body: JSON.stringify(body) });
 const seg = encodeURIComponent;
 
 export const api = {
@@ -260,6 +263,21 @@ export const api = {
     request<undefined>(`/v1/projects/${seg(projectId)}/api-keys/${seg(prefix)}`, {
       method: "DELETE",
     }),
+
+  getGitHub: (projectId: string) =>
+    request<GitHubStatus>(`/v1/projects/${seg(projectId)}/github`),
+
+  connectGitHub: (projectId: string, token: string) =>
+    request<GitHubStatus>(`/v1/projects/${seg(projectId)}/github/connection`, put({ token })),
+
+  disconnectGitHub: (projectId: string) =>
+    request<undefined>(`/v1/projects/${seg(projectId)}/github/connection`, { method: "DELETE" }),
+
+  setGitHubRepositories: (projectId: string, repositories: RepositoryMapping[]) =>
+    request<GitHubStatus>(
+      `/v1/projects/${seg(projectId)}/github/repositories`,
+      put({ repositories }),
+    ),
 };
 
 /** A message suitable for showing to the user, with the request id for support. */

@@ -761,7 +761,7 @@ Verified against the real Gemini API, once a key was available (the simulated pa
 The *Learn* stage, and the means to measure the *Investigate* stage.
 
 - **`learning/service.py`:** feedback (one per person per investigation, revisable), the learning record it creates or updates, evaluation cases.
-- **`learning/evaluation.py`:** `EvalCase`, the rule-based `judge`, the runner, five built-in cases.
+- **`learning/evaluation.py`:** `EvalCase`, the rule-based `judge`, the runner, five built-in cases (six since slice 9).
 - **`investigation/orchestrator.py`:** the model-facing steps were extracted into a database-free `ReportWriter`, so the evaluation runs exactly the steps an investigation runs.
 - **Migration `0008`:** `investigation_feedback`, `learning_records`, `evaluation_cases`.
 - **Web app:** feedback form under a report; Learning page.
@@ -783,3 +783,46 @@ Verified:
 - by tests: feedback rules and permissions, the learning record's contents, saving and loading a case, the judge, the runner with a scripted model
 - in a real browser against the emulator (with the Gemini stand-in): giving feedback, and the Learning page
 - against real Gemini (`gemini-3.5-flash`, prompt version 2): 3 passed, 0 failed, 2 could not run (429 quota exceeded). Two of the three passes needed one citation correction each. The prompt-injection case has not been run against a real model.
+
+## 23. Slice 9 (GitHub code changes): implementation record
+
+The first external integration: what a candidate deployment changed, as investigation evidence. It closes the "no code awareness" gap for commit messages and file names; file contents stay out.
+
+- **`core/crypto.py`:** `SecretBox` (Fernet) for secrets that must be stored. `EncryptionSettings` is mixed into the API's and the worker's settings only.
+- **`integrations/github/client.py`:** three read-only calls (repository, compare, commit), capped results, one error type whose messages are safe to show.
+- **`integrations/github/service.py`, `router.py`:** connect, replace, disconnect; service → repository mappings, verified with the token before saving. Admin role.
+- **`investigation/code_changes.py`:** the `CodeChangeSource` interface the orchestrator depends on. **`integrations/github/evidence.py`** implements it.
+- **`investigation/orchestrator.py`:** an optional `collect_code_changes` step after evidence collection. Its items continue the E-numbering and are snapshotted like the rest.
+- **Migration `0009`:** `github_connections` (one per project, encrypted token), `service_repositories`.
+- **Prompt version 3:** one paragraph explaining `code_change` items and their limits.
+- **Web app:** GitHub settings page.
+
+| Component | Responsibility | Failure behavior | Operational cost |
+|---|---|---|---|
+| **GitHub REST API** | Commit messages and changed file names for a deployment | The step notes what is missing; the investigation continues. Saving a mapping fails with 503. | Hosted. At most 6 requests per investigation (3 deployments, twice for a rollback), within the token's 5,000 requests per hour. |
+| **`SECRETS_ENCRYPTION_KEY`** | Encrypts stored tokens | Unset: the integration is off (503 on connect, the worker skips the step). Wrong or rotated: stored tokens can't be read and the report says to reconnect. | One more secret to keep, back up, and (later) rotate. |
+
+Decisions made during implementation:
+
+| Decision | Why |
+|---|---|
+| Our worker calls GitHub; GitHub never calls us | It works before the system is reachable from the internet. Webhooks and a deploy-reporting Action need a public URL. |
+| Fine-grained personal access token, behind an interface | Smallest thing that works for one team. A GitHub App replaces `connect` and the token lookup without touching the investigation. |
+| Tokens are encrypted, not hashed | Unlike our own API keys, we must present the token to GitHub, so we need it back. The key stays out of the database. |
+| The key goes to the API and the worker only | The API encrypts on save; the worker decrypts to fetch. The consumers have no field for it. |
+| Metadata only: no diffs | Sending source code to a third-party model is a decision each project owner should make deliberately. It also keeps prompts small. |
+| Code is fetched by code, not by the model | The model still has no tools. It cannot choose a repository, a commit or a URL. |
+| A separate, optional, non-fatal step | An investigation without code context is still useful; one that fails because GitHub was slow is not. Failures are recorded on the step and listed with the report. |
+| Compare against the previous deployment of the same service | "What changed in this release" is the question, not "what is in this commit". Without a previous deployment the single commit is used and the evidence says so. |
+| A rollback is compared in reverse | Compared forwards it shows nothing; what it removed is what matters. Found when running the client against real GitHub. |
+| Repositories are verified when the mapping is saved | A typo or a token without access is reported to the admin now, not discovered during an incident. |
+| Mappings use the service name, not its id | A mapping can be set up before the service first reports. |
+| Repository and commit are pattern-checked before entering a URL; redirects are not followed | Both come from stored input. The token must only ever reach the configured host. |
+| GitHub answers of 403, 404 and 422 are all "not found, or the token cannot read it" | GitHub itself doesn't distinguish a private repository from a missing one, and neither should our message. |
+
+Verified:
+- by tests: encryption round trip and failure modes; the client against a stand-in (headers, capping, every error status, malformed entries, path injection, no redirects); the settings API (token never returned, stored encrypted, audit record, role matrix, tenant isolation, validation, GitHub failures); investigations with code changes (compare, single commit, rollback, hostile commit text, each failure, not connected, unmapped, undecryptable token, an unexpected error); the settings page.
+- against the real GitHub API, on a public repository, with the Authorization header removed (no token involved): repository check, compare, single commit, reversed compare, missing repository, missing commit.
+
+Not verified: a real token with a private repository; the settings page in a real browser; prompt version 3 and the new evaluation case against a real model.
+

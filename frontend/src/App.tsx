@@ -10,6 +10,7 @@ import { ApiError } from "./lib/api";
 import type { Me } from "./lib/types";
 import { AnomaliesPage } from "./pages/AnomaliesPage";
 import { ApiKeysPage } from "./pages/ApiKeysPage";
+import { GitHubPage } from "./pages/GitHubPage";
 import { DeploymentsPage } from "./pages/DeploymentsPage";
 import { IncidentPage } from "./pages/IncidentPage";
 import { LearningPage } from "./pages/LearningPage";
@@ -139,6 +140,7 @@ function ProjectRoutes({ me, account }: { me: Me; account: Account }) {
         <Route path="learning" element={<LearningPage current={current} />} />
         <Route path="deployments" element={<DeploymentsPage current={current} />} />
         <Route path="api-keys" element={<ApiKeysPage current={current} />} />
+        <Route path="github" element={<GitHubPage current={current} />} />
         <Route path="*" element={<Navigate to="incidents" replace />} />
       </Routes>
     </AppShell>

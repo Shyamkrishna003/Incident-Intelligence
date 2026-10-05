@@ -1,6 +1,7 @@
 """One investigation, as a fixed sequence of steps.
 
     1. collect_evidence   code only; snapshots what the model will see
+       collect_code_changes   code only, optional; what candidate deployments changed
     2. analyze            model call -> draft report (one repair attempt if malformed)
     3. validate           code only; checks every citation
     4. verify             model call -> tries to disprove each hypothesis
@@ -24,6 +25,9 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from incident_intel.core.errors import NotFoundError
+from incident_intel.incidents.queries import IncidentDetail
+from incident_intel.investigation.code_changes import KIND as CODE_CHANGE
+from incident_intel.investigation.code_changes import CodeChangeSource
 from incident_intel.investigation.evidence import EvidenceItem, collect_evidence
 from incident_intel.investigation.llm import LLMError, LLMProvider, LLMResponse
 from incident_intel.investigation.models import (
@@ -178,8 +182,10 @@ class _Run(ReportWriter):
         *,
         max_llm_attempts: int,
         sleep: Sleep,
+        code_changes: CodeChangeSource | None = None,
     ) -> None:
         super().__init__(provider, max_llm_attempts=max_llm_attempts, sleep=sleep)
+        self.code_changes = code_changes
         self._session_factory = session_factory
         self._id = investigation.id
         self._project_id = investigation.project_id
@@ -217,7 +223,7 @@ class _Run(ReportWriter):
                 )
                 await session.commit()
 
-    async def collect(self, summary: dict[str, Any]) -> list[EvidenceItem]:
+    async def collect(self, summary: dict[str, Any]) -> tuple[IncidentDetail, list[EvidenceItem]]:
         async with self._session_factory() as session:
             try:
                 detail, items = await collect_evidence(session, self._scope, self._incident_id)
@@ -248,12 +254,52 @@ class _Run(ReportWriter):
         summary["by_kind"] = {
             kind: sum(item.kind == kind for item in items) for kind in {i.kind for i in items}
         }
+        return detail, items
+
+    async def collect_code_changes(
+        self, summary: dict[str, Any], detail: IncidentDetail, known: int, notes: list[str]
+    ) -> list[EvidenceItem]:
+        """Add what the candidate deployments changed, numbered after the ``known`` items."""
+        if self.code_changes is None:
+            return []
+        found = await self.code_changes.collect(self._scope, detail.candidate_deployments)
+        summary.update(found.summary)
+        notes.extend(found.notes)
+        items = [
+            EvidenceItem(f"E{known + offset}", CODE_CHANGE, title[:300], data)
+            for offset, (title, data) in enumerate(found.items, start=1)
+        ]
+        if items:
+            async with self._session_factory() as session:
+                session.add_all(
+                    InvestigationEvidence(
+                        investigation_id=self._id,
+                        ref=item.ref,
+                        project_id=self._project_id,
+                        position=known + offset,
+                        kind=item.kind,
+                        title=item.title,
+                        data=item.data,
+                    )
+                    for offset, item in enumerate(items)
+                )
+                await session.commit()
         return items
 
 
 async def _pipeline(run: _Run, notes: list[str]) -> Report:
     """Steps 1-4. Appends to ``notes`` whatever the checks changed."""
-    items = await run.step("collect_evidence", run.collect)
+    detail, items = await run.step("collect_evidence", run.collect)
+    if run.code_changes is not None:
+        try:
+            items += await run.step(
+                "collect_code_changes",
+                lambda summary: run.collect_code_changes(summary, detail, len(items), notes),
+            )
+        except Exception:
+            # Optional context: its failure must not cost the user the investigation.
+            logger.exception("code_changes_failed")
+            notes.append("Code changes could not be collected (unexpected error).")
     evidence = [item.for_model() for item in items]
     valid_refs = {item.ref for item in items}
 
@@ -293,6 +339,7 @@ async def run_investigation(
     *,
     max_llm_attempts: int = 4,
     sleep: Sleep = asyncio.sleep,
+    code_changes: CodeChangeSource | None = None,
 ) -> None:
     """Run a claimed investigation to completion: it ends "succeeded" or "failed"."""
     async with session_factory() as session:
@@ -304,7 +351,12 @@ async def run_investigation(
         investigation.prompt_version = PROMPT_VERSION
         await session.commit()
         run = _Run(
-            session_factory, provider, investigation, max_llm_attempts=max_llm_attempts, sleep=sleep
+            session_factory,
+            provider,
+            investigation,
+            max_llm_attempts=max_llm_attempts,
+            sleep=sleep,
+            code_changes=code_changes,
         )
 
     report: Report | None = None

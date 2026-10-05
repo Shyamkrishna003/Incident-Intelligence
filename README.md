@@ -10,7 +10,7 @@ AI-assisted incident detection, investigation, root-cause analysis, and reliabil
 
 ## Status
 
-Implemented through **slice 8: *Observe*, *Detect*, *Correlate*, *Investigate* and *Learn* (feedback, learning records, evaluation), with sign-in for people, a web app, and a scenario simulator**:
+Implemented through **slice 9: *Observe*, *Detect*, *Correlate*, *Investigate* (with code changes from GitHub) and *Learn* (feedback, learning records, evaluation), with sign-in for people, a web app, and a scenario simulator**:
 
 - **Foundation (slice 1):**
   - FastAPI backend with typed configuration, structured JSON logs (with secret redaction), and request IDs.
@@ -69,6 +69,12 @@ Implemented through **slice 8: *Observe*, *Detect*, *Correlate*, *Investigate* a
   - Each reviewed investigation becomes a self-contained learning record: evidence, report, model and prompt version, and the feedback.
   - `ii eval investigation` runs labelled cases through the real model and judges the reports with fixed rules.
   - An admin can save a reviewed investigation as a new evaluation case.
+
+- **GitHub code changes (slice 9):**
+  - A project admin connects GitHub with a read-only personal access token (stored encrypted) and says which repository holds each service's code.
+  - During an investigation, the worker asks GitHub what a candidate deployment changed since the previous deployment of that service.
+  - Commit messages and changed file names become one more cited evidence item. File contents are never fetched or sent to the model.
+  - If GitHub can't be reached, the investigation still runs and the report says what is missing.
 
 Next comes hardening: retention, row-level security, monitoring, CI and deployment. See the architecture doc, §11.
 
@@ -213,11 +219,48 @@ An investigation starts only when a member clicks **Investigate with AI** on an 
 1. collect evidence   code only: the incident, its anomalies, deployments around it,
                       declared dependencies, unaffected services, and warning/error log
                       patterns of the affected services. Each item gets a reference (E1, E2, …)
+                      If GitHub is connected: what the candidate deployments changed
 2. analyze            model call → draft report (one correction attempt if malformed)
 3. validate           code only: checks every citation
 4. verify             model call → tries to disprove each hypothesis
 5. store              the checked report, with what the checks changed
 ```
+
+### Code changes from GitHub
+
+Optional. Without it, a deployment is only a service, a version, a time and a description.
+
+**Setup (project admin, on the GitHub page of the web app):**
+
+1. On GitHub, create a **fine-grained personal access token**: repository access limited to the repositories of this project's services, permission **Contents: read-only**, with an expiry date.
+2. Paste it into the GitHub page. It is sent once, stored encrypted, and never shown again (only its last four characters).
+3. Map each service to its repository (`owner/name`). Each repository is checked with the token when you save.
+
+The server needs `SECRETS_ENCRYPTION_KEY` (`make secrets-key` adds one to an existing `.env`).
+
+**What happens during an investigation.** After the evidence is collected, a `collect_code_changes` step runs for up to 3 candidate deployments (those closest to the incident) that have a commit and a mapped repository:
+
+| Situation | What is fetched |
+|---|---|
+| An earlier deployment of the same service with a commit exists | The comparison from that commit to the deployed one |
+| No earlier deployment is known | The deployed commit alone (the evidence says this may be only part of the change) |
+| The deployed commit is older than the previous one (a rollback) | What the rollback removed |
+
+Each becomes a `code_change` evidence item: up to 20 commits (first line of each message, author, date), up to 40 changed files (path, status, lines added and removed), and the true totals.
+
+**What it never does:**
+
+- It never fetches or sends file contents or diffs. The model sees that `payments/queries.py` changed, not what the change was.
+- It never writes to GitHub. The token needs read access only.
+- It never fails an investigation. A missing mapping, a rejected token, a rate limit or an outage is listed with the report as "could not be included".
+
+**Security:**
+
+- The token is encrypted with Fernet under `SECRETS_ENCRYPTION_KEY`, which only the API and the investigation worker receive. A database leak alone doesn't reveal it.
+- It is never returned by the API, logged, or written to the audit log (which records only who connected and the last four characters).
+- Requests go only to the configured GitHub API host, redirects are not followed, and repository names and commit ids are checked against strict patterns before they are put in a URL.
+- Commit messages and file names are untrusted text, like log lines: they are redacted, truncated and passed as data. An evaluation case covers a commit message that tries to give the model instructions.
+- Only admins and owners can view or change the settings. Other projects can't use or see the connection.
 
 **What the model can and can't do.** It receives text and returns JSON. It has no tools: it can't query anything, fetch anything or act. There is no loop it controls.
 
@@ -268,7 +311,7 @@ An investigation starts only when a member clicks **Investigate with AI** on an 
 | `must_mention` | The leading hypothesis must mention at least one of these words |
 | `must_not_mention` | No supported or weakly supported hypothesis may name any of these |
 
-The five built-in cases are synthetic and hand-written:
+The six built-in cases are synthetic and hand-written:
 
 | Case | What it checks |
 |---|---|
@@ -277,6 +320,7 @@ The five built-in cases are synthetic and hand-written:
 | `insufficient_evidence` | Calls nothing "supported" when there's nothing to base it on |
 | `unrelated_deployment_only` | Doesn't blame a deployment of an unaffected service |
 | `instructions_inside_logs` | Follows the evidence, not a log line that gives it instructions |
+| `code_change_names_the_cause` | Uses a deployment's code changes when its description says nothing, and ignores a commit message that gives it instructions |
 
 - Results are reported as passed, failed, or **could not run** (the provider failed or the quota ran out). A case that could not run says nothing about the model.
 - The judge is keyword-based, so it is deterministic but blunt. It checks whether a report points the right way, not whether its reasoning is sound.
@@ -365,7 +409,7 @@ The two are not interchangeable: an API key is rejected on user endpoints, and a
 Everything in Docker:
 
 ```bash
-make env          # create .env with a generated API-key pepper (never overwrites an existing .env)
+make env          # create .env with generated secrets (never overwrites an existing .env)
 make venv         # create .venv and install hash-pinned dependencies (host tooling)
 make up           # PostgreSQL, Kafka, Redis, migrations, topic setup, API, storage consumer
 make bootstrap ORG=acme PROJECT=payments   # prints an API key ONCE on stdout
@@ -413,6 +457,7 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | Anomalies | Anomalies in the last 24 hours, ongoing first. Each row shows the evidence ("rose to 1,700 ms, usually about 120 ms") and links to the metric's chart. |
 | Deployments | The project's deployments in the last 7 days, newest first, each linking to its service. |
 | API keys | Admins and owners only. Create a key (shown once, with a copy button) and revoke keys after confirmation. |
+| GitHub | Admins and owners only. Connect with an access token (never shown again). Once connected, the page shows only the status, with buttons to replace the token or disconnect after confirmation. Map services to repositories; a saved list is shown read-only until you choose to edit it. A repository the token can't read is flagged on its own row. |
 
 - Every screen has loading, empty and error states. Errors show the server's message and a retry button.
 - What a role may do is enforced by the API. The app only hides controls a user couldn't use.
@@ -456,6 +501,10 @@ The OpenAPI docs are at http://localhost:8000/docs. They're disabled when `ENVIR
 | GET | `/v1/projects/{project_id}/learning-records` | any member | Verdict counts and the reviewed investigations, newest first |
 | POST | `/v1/projects/{project_id}/investigations/{investigation_id}/evaluation-case` | admin or owner | Save the investigation's evidence as an evaluation case with rules |
 | GET | `/v1/projects/{project_id}/evaluation-cases` | admin or owner | The project's saved evaluation cases |
+| GET | `/v1/projects/{project_id}/github` | admin or owner | Whether GitHub is connected (last four characters of the token only) and the service → repository mappings |
+| PUT | `/v1/projects/{project_id}/github/connection` | admin or owner | Store or replace the project's GitHub token. **503** if the server has no `SECRETS_ENCRYPTION_KEY`. |
+| DELETE | `/v1/projects/{project_id}/github/connection` | admin or owner | Delete the stored token. Mappings are kept. |
+| PUT | `/v1/projects/{project_id}/github/repositories` | admin or owner | Replace the mappings (at most 50). Each repository is checked with the token first: **422** naming the entry it can't read, **409** if not connected or the token is rejected, **503** if GitHub can't be reached. |
 | GET | `/v1/projects/{project_id}/dependencies` | any member | Declared service dependencies |
 | PUT | `/v1/projects/{project_id}/dependencies` | admin or owner | Replace the declared dependencies |
 | GET | `/v1/services/{service}/metrics` | API key with `telemetry:read` | The metrics a service has reported, with the number of series each has. Also at `/v1/projects/{project_id}/services/{service}/metrics` for signed-in users. |
@@ -546,7 +595,7 @@ ii simulate [--live] [--no-incident] [--backfill-minutes 60] [--incident-after-m
 ```
 backend/
   src/incident_intel/
-    core/        config, logging + redaction, errors, middleware (request context, body limit)
+    core/        config, logging + redaction, errors, middleware (request context, body limit), encryption of stored secrets
     db/          engine/session lifecycle, base model, migration helpers
     auth/        verifying Firebase ID tokens
     tenancy/     organizations, projects, API keys, users, memberships, roles, access checks
@@ -556,6 +605,7 @@ backend/
     streaming/   Kafka: topics, async publisher, consumer loop with dead-lettering, admin
     ingestion/   ingestion API: schemas, normalization, publishing
     telemetry/   message contracts, models, idempotent storage consumer, read APIs
+    integrations/github/  GitHub client, token and repository settings, code changes as evidence
     learning/    feedback, learning records, evaluation cases and the rule-based judge
     investigation/  evidence collection, LLM provider (Gemini), prompts, report checks, orchestrator, worker
     incidents/   grouping rules, incident lifecycle and timeline, service dependencies, incidents API
@@ -570,7 +620,7 @@ frontend/
     auth/        sign-in state and actions (Firebase), error messages
     hooks/       data fetching and mutations (TanStack Query)
     components/  shared UI, app shell, metric chart
-    pages/       sign-in, setup, services, service (chart), API keys
+    pages/       sign-in, setup, incidents, services, service (chart), learning, API keys, GitHub
 examples/              example client script
 infra/postgres/init/   first-run database init (creates the test database)
 infra/firebase-emulator/  optional local Firebase Auth emulator image
@@ -587,6 +637,7 @@ See [.env.example](.env.example).
 - `RATE_LIMIT_REQUESTS` and `RATE_LIMIT_WINDOW_SECONDS` set the per-key limit. `RATE_LIMIT_FAIL_OPEN`, `IDEMPOTENCY_TTL_SECONDS` and `API_KEY_CACHE_TTL_SECONDS` are optional.
 - `VITE_FIREBASE_*` configure the web app. They are public identifiers that ship in the browser bundle. Vite exposes only `VITE_`-prefixed variables to the browser, so the secrets in the same `.env` file stay out of it.
 - `GEMINI_API_KEY` is a **secret**. Only the investigation worker receives it. `GEMINI_MODEL` selects the model.
+- `SECRETS_ENCRYPTION_KEY` is a **secret**: a Fernet key that encrypts stored GitHub tokens. Only the API and the investigation worker receive it. `make env` generates one; `make secrets-key` adds one to an existing `.env`. Empty disables the GitHub integration. **Changing it makes every stored token unreadable**, and each project has to connect GitHub again.
 - `FIREBASE_PROJECT_ID` enables sign-in for people. `FIREBASE_AUTH_EMULATOR_HOST` switches to the local emulator (never in production).
 - Real environment variables override `.env`, and `.env` is git-ignored. Never commit it.
 
@@ -616,6 +667,11 @@ See [.env.example](.env.example).
 - **Saving an evaluation case is API-only,** with no screen in the web app.
 - **A learning record's verdict follows the most recent feedback** when several people disagree. All answers are kept in the record.
 - **Only Gemini is supported.** A local Ollama provider is planned.
+- **Code changes are names, not contents.** The model sees commit messages and changed file paths, not diffs, so it can say a deployment touched a query file but not what the change does. Sending diff excerpts is planned as a per-project opt-in.
+- **GitHub access is one personal access token per project,** tied to the person who created it and valid until it expires. A GitHub App (short-lived tokens, per-installation permissions) is the right replacement for a multi-customer product. There is no key rotation procedure yet: changing `SECRETS_ENCRYPTION_KEY` requires reconnecting.
+- **The GitHub integration has not been run end to end with a real token.** The client was run against the real GitHub API on a public repository without a token, and everything else against a stand-in. Token handling with a private repository is covered by tests only.
+- **Code changes need a commit on the deployment** and a deployment record for the previous release. Only GitHub is supported, on github.com (a GitHub Enterprise URL can be set with `GITHUB_API_URL` but is untested). Deployments are still reported by your pipeline; there are no GitHub webhooks.
+- **The `code_change_names_the_cause` evaluation case has not been run against a real model,** and prompt version 3 has not been evaluated at all (the Gemini quota was exhausted).
 - **Evidence is a fixed set.** The model can't ask for more (for example a different time window), and no metric time series beyond each anomaly's summary is included.
 - **Investigations are manual.** None starts automatically when an incident opens.
 - **Only signed-in users can start or read investigations;** there are no API-key endpoints for them.

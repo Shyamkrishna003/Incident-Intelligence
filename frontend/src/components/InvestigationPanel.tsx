@@ -56,8 +56,9 @@ export function InvestigationPanel({
         <>
           <p className="mt-1 max-w-prose text-sm text-ink-2">
             An AI model can read the evidence for this incident (the anomalies, deployments,
-            dependencies and error logs) and suggest explanations to check. Every statement it
-            makes must cite that evidence.
+            dependencies and error logs, plus what the deployments changed if GitHub is
+            connected) and suggest explanations to check. Every statement it makes must cite
+            that evidence.
           </p>
           <div className="mt-3">
             {button("Investigate with AI") ?? (

@@ -5,6 +5,7 @@ model reasons over it and must cite it, and code checks every citation before an
 shown. Each run and each step is recorded.
 
 - ``evidence``: collects and snapshots the evidence (no LLM).
+- ``code_changes``: the interface for "what did a deployment change?" (GitHub implements it).
 - ``llm``: the provider interface and the Gemini implementation.
 - ``prompts``: what the model is told. Evidence is passed as clearly delimited data.
 - ``schemas`` / ``validation``: the report format and the checks applied to model output.
